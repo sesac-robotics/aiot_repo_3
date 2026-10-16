@@ -8,7 +8,7 @@ hub IP 는 config/common.yaml 의 hub_host 를 고친다.
 터미널에서는:  python3 run_client.py --node student3 --server 127.0.0.1
 """
 
-from tools.fake_node import main
+from tools.node_template import main
 
 if __name__ == "__main__":
     main()

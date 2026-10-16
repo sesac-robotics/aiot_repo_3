@@ -3,6 +3,7 @@ SQLite 기록. DB는 hub 프로세스 하나만 쓴다.
 WAL 모드로 열어, 다른 프로그램(show_db, DB 뷰어)이 읽는 동안에도 기록이 막히지 않게 한다.
 
 지금 있는 표 (TCP·DB 시험용 최소 구성):
+- nodes       : 노드별 접속 PC (호스트 이름, IP, OS) - 어느 노드가 어느 PC 인지
 - messages    : 노드가 보낸 원본 메시지 전부
 - node_status : 노드별 최신 하트비트 (fps, cpu)
 - cameras     : 노드별 카메라 정보 (node_info 최신값)
@@ -13,6 +14,10 @@ import json
 import sqlite3
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS nodes (
+  node TEXT PRIMARY KEY, hostname TEXT, ip TEXT, peer TEXT, os TEXT,
+  python TEXT, pid INTEGER, connected_ts REAL, updated_ts REAL);
+
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY, node TEXT, seq INTEGER, type TEXT, seat INTEGER,
   ts REAL, rx_ts REAL, value TEXT, conf REAL);
@@ -53,9 +58,31 @@ class Database:
             (node, last_ts, value.get("fps"), value.get("cpu")))
         self.conn.commit()
 
+    def upsert_node_pc(self, node: str, pc: dict, peer: str, connected_ts: float, ts: float):
+        """노드가 어느 PC 에서 접속했는지. peer = hub 가 본 상대 주소 (ip:port)."""
+        self.conn.execute(
+            "INSERT INTO nodes (node, hostname, ip, peer, os, python, pid, connected_ts, updated_ts)"
+            " VALUES (?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(node) DO UPDATE SET hostname=excluded.hostname, ip=excluded.ip,"
+            " peer=excluded.peer, os=excluded.os, python=excluded.python, pid=excluded.pid,"
+            " connected_ts=excluded.connected_ts, updated_ts=excluded.updated_ts",
+            (node, pc.get("hostname"), pc.get("ip"), peer, pc.get("os"), pc.get("python"),
+             pc.get("pid"), connected_ts, ts))
+        self.conn.commit()
+
     def upsert_node_info(self, node: str, ts: float, value: dict):
-        """node_info 한 건을 cameras / seats 에 반영. 그 노드의 예전 좌석 목록은 지운다."""
-        cam = value.get("camera") or {}
+        """node_info 한 건을 cameras / seats 에 반영. 그 노드의 예전 좌석 목록은 지운다.
+        (camera / seats 키가 없으면 그 표는 건드리지 않는다)"""
+        if "camera" in value:
+            self._upsert_camera(node, ts, value["camera"] or {})
+        if "seats" in value:
+            self.conn.execute("DELETE FROM seats WHERE node=?", (node,))
+            self.conn.executemany(
+                "INSERT INTO seats (seat, node, label, updated_ts) VALUES (?,?,?,?)",
+                [(s["seat"], node, s.get("label"), ts) for s in value["seats"]])
+        self.conn.commit()
+
+    def _upsert_camera(self, node: str, ts: float, cam: dict):
         self.conn.execute(
             "INSERT INTO cameras (node, cam_index, width, height, fps, updated_ts)"
             " VALUES (?,?,?,?,?,?)"
@@ -64,11 +91,6 @@ class Database:
             " updated_ts=excluded.updated_ts",
             (node, cam.get("index"), cam.get("width"), cam.get("height"),
              cam.get("fps"), ts))
-        self.conn.execute("DELETE FROM seats WHERE node=?", (node,))
-        self.conn.executemany(
-            "INSERT INTO seats (seat, node, label, updated_ts) VALUES (?,?,?,?)",
-            [(s["seat"], node, s.get("label"), ts) for s in value.get("seats", [])])
-        self.conn.commit()
 
     def close(self):
         self.conn.close()

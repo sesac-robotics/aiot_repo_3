@@ -18,6 +18,7 @@
 import collections
 import logging
 import os
+import platform
 import socket
 import threading
 import time
@@ -44,7 +45,7 @@ class NodeClient:
         self._stop = threading.Event()
         self._seq = 0
         self._fps = 0.0
-        self._info: dict | None = None     # 접속할 때마다 보낼 node_info
+        self._info: dict | None = None     # 접속할 때마다 보낼 node_info (카메라·좌석)
         self._pending = collections.deque(maxlen=PENDING_MAX)
         self._threads: list[threading.Thread] = []
 
@@ -68,10 +69,11 @@ class NodeClient:
         self._fps = fps
 
     def set_info(self, info: dict):
-        """카메라·좌석 정보. 접속(재접속 포함)할 때마다 node_info 로 한 번 보낸다."""
+        """카메라·좌석 정보. 접속(재접속 포함)할 때마다 node_info 로 한 번 보낸다.
+        이 PC 정보(pc)는 set_info 를 안 불러도 자동으로 붙는다."""
         self._info = info
         if self.connected:
-            self.send("node_info", value=info)
+            self._send_node_info()
 
     def send(self, type_: str, seat=None, value=None, conf: float = 1.0) -> bool:
         """메시지 하나를 보낸다. 보냈으면 True, 끊겨서 못 보냈으면 False."""
@@ -123,8 +125,7 @@ class NodeClient:
                 self._sock = sock
             log.info("hub 접속: %s:%d (node=%s)", self.host, self.port, self.node)
             self._send_heartbeat()             # 첫 메시지로 노드 등록
-            if self._info is not None:
-                self.send("node_info", value=self._info)
+            self._send_node_info()             # 이 PC 정보 + 카메라·좌석
             self._flush_pending()
             self._recv_loop(sock)              # 끊길 때까지 여기서 대기
             self._close()
@@ -164,6 +165,22 @@ class NodeClient:
                 self._pending.appendleft(msg)
                 return
             log.info("밀린 사건 전송: %s seq=%d", msg["type"], msg["seq"])
+
+    def _pc_info(self) -> dict:
+        """이 클라이언트가 돌아가는 PC를 구별할 정보."""
+        ip = None
+        with self._lock:
+            if self._sock is not None:
+                try:
+                    ip = self._sock.getsockname()[0]   # hub 쪽으로 나가는 내 IP
+                except OSError:
+                    pass
+        return {"hostname": socket.gethostname(), "ip": ip,
+                "os": f"{platform.system()} {platform.release()}",
+                "python": platform.python_version(), "pid": os.getpid()}
+
+    def _send_node_info(self):
+        self.send("node_info", value={**(self._info or {}), "pc": self._pc_info()})
 
     def _send_heartbeat(self):
         try:
