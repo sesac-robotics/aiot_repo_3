@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# hub SQLite DB (노트북마다 다름)
+*.db
+*.db-shm
+*.db-wal
