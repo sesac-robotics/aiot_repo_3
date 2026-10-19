@@ -73,6 +73,7 @@ class Monitor:
         self.plabels = LABELS if self.ensemble is None else self.ensemble.labels
         self.show_input = args.show_input and need_mask
         self.base = None
+        self.state = {"present": False, "calibrating": False, "face": (), "posture": ()}   # 확정 상태 (전송용)
 
     def judge_posture(self, d, clean, lms):
         if self.ensemble is None:
@@ -113,6 +114,8 @@ class Monitor:
         draw_arm_points(frame, pose_lms, hand)
         draw_face_points(frame, face_res)
 
+        self.state = {"present": not (p_raw is None and f is None), "calibrating": self.calib.active,
+                      "face": (), "posture": ()}
         if p_raw is None and f is None:                 # 사람 없음
             self.posture_filter.reset()
             self.face_filter.reset()
@@ -139,6 +142,7 @@ class Monitor:
             self.pause_posture()
         posture_issues = self.judge_posture(d, clean, pose_lms) if (d is not None and not hand) else []
         posture_conf = self.posture_filter.update(posture_issues, now)
+        self.state.update(face=tuple(face_conf), posture=tuple(posture_conf))
         if self.show_input:
             paste_inputs(frame, self.ensemble.inputs)
 
