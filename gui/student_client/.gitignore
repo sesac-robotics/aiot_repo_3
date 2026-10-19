@@ -1,0 +1,12 @@
+# 착석자 모니터링: 얼굴 이미지(생체 정보)·데이터·모델은 올리지 않음
+data/
+data_old/
+eval/
+check_data/
+models/
+assets/
+*.task
+*.pt
+results/**/compare_*.md
+results/compare_*.md
+old/
