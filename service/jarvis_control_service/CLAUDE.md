@@ -29,7 +29,7 @@ aiot_repo_3/
 │   ├─ hub/control_config.py                  control 전용: control.yaml 읽기, DB·스키마 경로
 │   ├─ config/control.yaml                    좌석 각도·옆자리·타이머 (control 만)
 │   ├─ db/hub.db                              SQLite 파일
-│   ├─ tests/, tools/
+│   ├─ tools/
 │   └─ run_hub.py, run_client.py
 ├─ service/jarvis_DB/create.sql               DB 스키마 원본 (db.py 가 시작할 때 실행)
 ├─ service/jarvis_vision_service/run_assistant.py   vision_service 노드
@@ -48,13 +48,13 @@ aiot_repo_3/
 | 현재 | 목표 |
 | --- | --- |
 | `hub/hub.py`, `hub/db.py`, `hub/event_manager.py`, `hub/control_config.py` | `hub_server.py`, `db.py`, `event_manager.py` … (이 폴더 바로 아래) |
-| `tests/test_event_manager.py` | (위치 미정) |
+| `tools/test_event_manager.py` | (위치 미정) |
 
 ## 실행 / 시험
 
 ```bash
 python3 run_hub.py                                  # control 서버 (또는 python3 -m hub -v)
-python3 -m unittest discover -s tests -v            # event_manager 단위 테스트 (가짜 시계)
+python3 -m unittest tools.test_event_manager -v     # event_manager 단위 테스트 (가짜 시계)
 python3 -m tools.fake_node --server 127.0.0.1       # 통신 시나리오: 질문 → 쓰러짐 선점 → confirm/resolve
 python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fall_alert 까지
 ```
