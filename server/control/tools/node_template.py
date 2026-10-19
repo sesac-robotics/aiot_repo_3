@@ -22,10 +22,10 @@ from common.client import NodeClient           # noqa: E402
 from common.config import load_config          # noqa: E402
 
 # ---- TODO: 노드마다 고친다 ----------------------------------------------------
-NODE = "student1"        # fixedcam / tracker / student1~4
+NODE = "student1"        # 노드 이름 (fixedcam / movingcam / student1~4)
 CAMERA = {"index": 0, "width": 640, "height": 480, "fps": 15}
-SEATS = [1]              # 1~4 좌석, 5 = 매트
-LOOP_FPS = 15
+SEATS = [1]              # 이 노드가 보는 좌석. 1~4 좌석
+LOOP_FPS = 15            # 감지 루프 목표 속도 (초당 반복 횟수)
 # ---------------------------------------------------------------------------
 
 
@@ -41,6 +41,7 @@ def detect() -> dict:
 
 
 def main():
+    # ---- 1. 명령줄 인자 / 설정 ------------------------------------------
     ap = argparse.ArgumentParser(description=f"{NODE} 노드")
     ap.add_argument("--server", default=None, help="hub IP (기본: config/common.yaml)")
     ap.add_argument("--port", type=int, default=None)
@@ -50,15 +51,19 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     logging.getLogger("client").setLevel(logging.ERROR)   # 재접속 로그는 숨김
 
+    # ---- 2. hub 접속 클라이언트 준비 ------------------------------------
     client = NodeClient(NODE, cfg["hub_host"], int(cfg["hub_port"]), on_message=on_message)
     client.set_info({"camera": CAMERA,
                      "seats": [{"seat": s, "label": f"{s}번"} for s in SEATS]})
+
+    # ---- 3. 백그라운드 스레드 시작 -----------
     client.start()
     print(f"{NODE}: hub {cfg['hub_host']}:{cfg['hub_port']} 에 접속 중...")
 
+    # ---- 4. 감지 루프 ---------------------------------------------------
     connected_once = False
-    prev = detect()
-    frames, t0 = 0, time.time()
+    prev = detect()                  # 직전 상태 (변화 감지용)
+    frames, t0 = 0, time.time()      # fps 측정용
     try:
         while True:
             start = time.time()
@@ -66,17 +71,21 @@ def main():
                 print(f"{NODE}: 연결됨. 대기 중... (Ctrl+C 로 끝)")
                 connected_once = True
 
+            # [이벤트 판정·전송] 직전 상태와 비교해 바뀐 순간(엣지)에만 보낸다.
+            # TCP 로 보내고, 끊겨 있으면 사건 메시지는 버퍼에 모았다가 재접속 후 다시 보낸다.
             state = detect()
-            # 사건은 상태가 바뀐 순간에만 보낸다
             if state["hand"] != prev["hand"]:
                 client.send("hand_raise", seat=SEATS[0],
                             value={"state": "start" if state["hand"] else "end"})
             prev = state
 
+            # 1초마다 실제 루프 속도를 재서 NodeClient 에 알려 준다 -> 다음 heartbeat 에 실려 간다
             frames += 1
             if time.time() - t0 >= 1.0:
                 client.set_fps(frames / (time.time() - t0))
                 frames, t0 = 0, time.time()
+
+            # LOOP_FPS 에 맞춰 남은 시간만큼 쉰다
             time.sleep(max(0.0, 1.0 / LOOP_FPS - (time.time() - start)))
     except KeyboardInterrupt:
         pass

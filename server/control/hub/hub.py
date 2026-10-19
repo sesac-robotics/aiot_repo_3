@@ -4,7 +4,6 @@ hub TCP 서버 (TCP 통신 + DB 기록만 남긴 최소 구성)
 - 노드 <-> hub: TCP 위의 줄 단위 JSON (common/message.py), 포트 5000
 - 받은 메시지는 전부 messages 표에 기록
 - heartbeat -> node_status, node_info -> nodes(접속 PC) / cameras / seats
-- 같은 노드 이름이 다른 PC 에서 접속하면 경고 (설정 실수 찾기용)
 - 사건 메시지(fall, hand_raise ...)에는 ack 로 답한다 (왕복 통신 확인용)
 - 하트비트가 6초(3회) 안 오면 노드 끊김으로 로그
 
@@ -45,7 +44,6 @@ class HubServer:
         self.db_path = db_path
         self.db = Database(db_path)
         self.nodes: dict[str, NodeConn] = {}
-        self.last_host: dict[str, str] = {}   # 노드 이름 -> 마지막으로 접속한 PC 호스트 이름
         self.seq = 0
 
     # ---- 송신 ----------------------------------------------------------
@@ -91,10 +89,6 @@ class HubServer:
                     peer_str = f"{peer[0]}:{peer[1]}" if peer else "?"
                     old = self.nodes.get(node_name)
                     if old and old.writer is not writer:
-                        if old.online:
-                            log.warning("%s 가 이미 접속 중(%s, %s) - 새 연결(%s)로 바꿈. "
-                                        "같은 이름을 두 PC에서 쓰고 있지 않은지 확인",
-                                        node_name, old.hostname or "?", old.peer, peer_str)
                         old.writer.close()
                     self.nodes[node_name] = NodeConn(node_name, writer, rx_ts,
                                                      peer=peer_str, connected_ts=rx_ts)
@@ -139,10 +133,6 @@ class HubServer:
         pc = value.get("pc") or {}
         host = pc.get("hostname")
         if host:
-            prev = self.last_host.get(conn.name)
-            if prev and prev != host:
-                log.warning("%s 의 PC 가 바뀜: %s -> %s", conn.name, prev, host)
-            self.last_host[conn.name] = host
             conn.hostname = host
             self.db.upsert_node_pc(conn.name, pc, conn.peer, conn.connected_ts, msg["ts"])
         self.db.upsert_node_info(conn.name, msg["ts"], value)
