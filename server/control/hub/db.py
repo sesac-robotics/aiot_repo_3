@@ -1,47 +1,53 @@
 """
-SQLite 기록. DB는 hub 프로세스 하나만 쓴다.
-WAL 모드로 열어, 다른 프로그램(show_db, DB 뷰어)이 읽는 동안에도 기록이 막히지 않게 한다.
+SQLite 기록. DB 에 쓰는 곳은 여기 한 곳이다 (hub 프로세스 하나만 쓴다).
+WAL 모드로 열어, 다른 프로그램(DB 뷰어)이 읽는 동안에도 기록이 막히지 않게 한다.
 
-지금 있는 표 (TCP·DB 시험용 최소 구성):
-- nodes       : 노드별 접속 PC (호스트 이름, IP, OS) - 어느 노드가 어느 PC 인지
-- messages    : 노드가 보낸 원본 메시지 전부
-- node_status : 노드별 최신 하트비트 (fps, cpu)
-- cameras     : 노드별 카메라 정보 (node_info 최신값)
-- seats       : 좌석과 그 좌석을 보는 노드 (node_info 최신값)
+스키마 원본은 db/create.sql (시작할 때 실행).
+- nodes       : 노드별 접속 PC (호스트 이름, IP, OS)
+- messages    : 노드가 보낸 원본 메시지 (heartbeat, track_offset 제외)
+- node_status : 노드별 최신 하트비트 (fps, cpu, cam1_fps, cam2_fps) + online
+- seat        : 좌석 프리셋 각도·옆자리 (config/control.yaml 에서 채움)
+- help_event  : 도움 이벤트 (event_manager 가 정한 상태)
+- event_log   : 이벤트별 처리 기록
+
+스키마를 바꾸면 SCHEMA_VERSION 을 올린다. 옛 hub.db 는 지우고 다시 만든다 (마이그레이션 안 함).
 """
 
 import json
 import sqlite3
+from pathlib import Path
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS nodes (
-  node TEXT PRIMARY KEY, hostname TEXT, ip TEXT, peer TEXT, os TEXT,
-  python TEXT, pid INTEGER, connected_ts REAL, updated_ts REAL);
+from common.config import CREATE_SQL
 
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY, node TEXT, seq INTEGER, type TEXT, seat INTEGER,
-  ts REAL, rx_ts REAL, value TEXT, conf REAL);
+SCHEMA_VERSION = 2          # 1 = cameras/seats 가 있던 옛 구조
 
-CREATE TABLE IF NOT EXISTS node_status (
-  node TEXT PRIMARY KEY, last_ts REAL, fps REAL, cpu REAL, clock_offset_s REAL);
 
-CREATE TABLE IF NOT EXISTS cameras (
-  node TEXT PRIMARY KEY, cam_index INTEGER, width INTEGER, height INTEGER,
-  fps REAL, updated_ts REAL);
-
-CREATE TABLE IF NOT EXISTS seats (
-  seat INTEGER, node TEXT, label TEXT, updated_ts REAL,
-  PRIMARY KEY (seat, node));
-"""
+class SchemaMismatch(RuntimeError):
+    pass
 
 
 class Database:
-    def __init__(self, path):
+    def __init__(self, path, create_sql: Path = CREATE_SQL):
+        self.path = path
         self.conn = sqlite3.connect(str(path))
+        self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript(SCHEMA)
+        self._check_version()
+        self.conn.executescript(Path(create_sql).read_text(encoding="utf-8"))
+        self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.conn.commit()
 
+    def _check_version(self):
+        has_tables = self.conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if has_tables and version != SCHEMA_VERSION:
+            self.conn.close()
+            raise SchemaMismatch(
+                f"{self.path} 는 옛 스키마(v{version})입니다. 지금은 v{SCHEMA_VERSION}. "
+                f"개발 중에는 hub.db, hub.db-wal, hub.db-shm 을 지우고 다시 실행하세요.")
+
+    # ---- 노드 ------------------------------------------------------------
     def insert_message(self, msg: dict, rx_ts: float):
         self.conn.execute(
             "INSERT INTO messages (node, seq, type, seat, ts, rx_ts, value, conf)"
@@ -52,10 +58,20 @@ class Database:
 
     def upsert_node_status(self, node: str, last_ts: float, value: dict):
         self.conn.execute(
-            "INSERT INTO node_status (node, last_ts, fps, cpu) VALUES (?,?,?,?)"
+            "INSERT INTO node_status (node, last_ts, fps, cpu, online, cam1_fps, cam2_fps)"
+            " VALUES (?,?,?,?,1,?,?)"
             " ON CONFLICT(node) DO UPDATE SET last_ts=excluded.last_ts,"
-            " fps=excluded.fps, cpu=excluded.cpu",
-            (node, last_ts, value.get("fps"), value.get("cpu")))
+            " fps=excluded.fps, cpu=excluded.cpu, online=1,"
+            " cam1_fps=excluded.cam1_fps, cam2_fps=excluded.cam2_fps",
+            (node, last_ts, value.get("fps"), value.get("cpu"),
+             value.get("cam1_fps"), value.get("cam2_fps")))
+        self.conn.commit()
+
+    def set_node_online(self, node: str, online: bool):
+        self.conn.execute(
+            "INSERT INTO node_status (node, online) VALUES (?,?)"
+            " ON CONFLICT(node) DO UPDATE SET online=excluded.online",
+            (node, int(online)))
         self.conn.commit()
 
     def upsert_node_pc(self, node: str, pc: dict, peer: str, connected_ts: float, ts: float):
@@ -70,27 +86,53 @@ class Database:
              pc.get("pid"), connected_ts, ts))
         self.conn.commit()
 
-    def upsert_node_info(self, node: str, ts: float, value: dict):
-        """node_info 한 건을 cameras / seats 에 반영. 그 노드의 예전 좌석 목록은 지운다.
-        (camera / seats 키가 없으면 그 표는 건드리지 않는다)"""
-        if "camera" in value:
-            self._upsert_camera(node, ts, value["camera"] or {})
-        if "seats" in value:
-            self.conn.execute("DELETE FROM seats WHERE node=?", (node,))
-            self.conn.executemany(
-                "INSERT INTO seats (seat, node, label, updated_ts) VALUES (?,?,?,?)",
-                [(s["seat"], node, s.get("label"), ts) for s in value["seats"]])
+    # ---- 좌석 ------------------------------------------------------------
+    def sync_seats(self, seats: dict):
+        """control.yaml 의 seats 를 seat 표에 반영."""
+        self.conn.executemany(
+            "INSERT INTO seat (seat, label, pan, tilt, neighbors) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(seat) DO UPDATE SET label=excluded.label, pan=excluded.pan,"
+            " tilt=excluded.tilt, neighbors=excluded.neighbors",
+            [(int(s), c.get("label", f"{s}번 좌석"), c.get("pan"), c.get("tilt"),
+              ",".join(str(n) for n in c.get("neighbors", [])))
+             for s, c in seats.items()])
         self.conn.commit()
 
-    def _upsert_camera(self, node: str, ts: float, cam: dict):
+    # ---- 이벤트 ----------------------------------------------------------
+    def save_event(self, row: dict):
+        cols = ", ".join(row)
+        marks = ", ".join("?" for _ in row)
+        updates = ", ".join(f"{k}=excluded.{k}" for k in row if k != "event_id")
         self.conn.execute(
-            "INSERT INTO cameras (node, cam_index, width, height, fps, updated_ts)"
-            " VALUES (?,?,?,?,?,?)"
-            " ON CONFLICT(node) DO UPDATE SET cam_index=excluded.cam_index,"
-            " width=excluded.width, height=excluded.height, fps=excluded.fps,"
-            " updated_ts=excluded.updated_ts",
-            (node, cam.get("index"), cam.get("width"), cam.get("height"),
-             cam.get("fps"), ts))
+            f"INSERT INTO help_event ({cols}) VALUES ({marks})"
+            f" ON CONFLICT(event_id) DO UPDATE SET {updates}",
+            tuple(row.values()))
+
+    def insert_log(self, event_id: int, ts: float, action: str, actor: str, detail=None):
+        self.conn.execute(
+            "INSERT INTO event_log (event_id, ts, action, actor, detail) VALUES (?,?,?,?,?)",
+            (event_id, ts, action, actor,
+             None if detail is None else json.dumps(detail, ensure_ascii=False)))
+
+    def apply(self, saves, logs):
+        """event_manager 의 Effects 를 한 번에 기록 (한 트랜잭션)."""
+        if not saves and not logs:
+            return
+        with self.conn:
+            for row in saves:
+                self.save_event(row)
+            for log_row in logs:
+                self.insert_log(*log_row)
+
+    def max_event_id(self) -> int:
+        row = self.conn.execute("SELECT max(event_id) FROM help_event").fetchone()
+        return row[0] or 0
+
+    def load_open_events(self) -> list[dict]:
+        """재시작 전에 열려 있던 이벤트 (active / waiting)."""
+        rows = self.conn.execute(
+            "SELECT * FROM help_event WHERE status != 'closed' ORDER BY event_id").fetchall()
+        return [dict(r) for r in rows]
 
     def close(self):
         self.conn.close()

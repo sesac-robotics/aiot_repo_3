@@ -1,1 +1,1 @@
-"""hub: TCP 서버 + SQLite 기록."""
+"""hub(control): TCP 서버 + 이벤트 관리(event_manager) + SQLite 기록(db)."""
