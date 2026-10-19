@@ -17,7 +17,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from common.config import CREATE_SQL
+from hub.control_config import CREATE_SQL
 
 SCHEMA_VERSION = 2          # 1 = cameras/seats 가 있던 옛 구조
 

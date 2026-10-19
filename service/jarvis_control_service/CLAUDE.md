@@ -17,26 +17,37 @@
 
 ```
 aiot_repo_3/
+├─ common/                                    모든 노드 공용 (강사님 확인 필요한 추가 폴더)
+│   ├─ protocol.py                            노드·메시지 종류·좌석의 유일한 기준
+│   ├─ node_client.py                         NodeClient
+│   └─ config.py                              config/common.yaml 읽기 (load_config)
+├─ config/common.yaml                         control_host, control_port (모든 노드)
 ├─ gui/instructor_console/run_console.py      instructor_console 노드 (강사 대시보드)
 ├─ gui/student_client/run_client.py           student_client_N 노드 (--seat N)
 ├─ service/jarvis_control_service/            control 서버 (이 폴더)
+│   ├─ hub/hub.py, event_manager.py, db.py
+│   ├─ hub/control_config.py                  control 전용: control.yaml 읽기, DB·스키마 경로
+│   ├─ config/control.yaml                    좌석 각도·옆자리·타이머 (control 만)
+│   ├─ db/hub.db                              SQLite 파일
+│   ├─ tests/, tools/
+│   └─ run_hub.py, run_client.py
 ├─ service/jarvis_DB/create.sql               DB 스키마 원본 (db.py 가 시작할 때 실행)
 ├─ service/jarvis_vision_service/run_assistant.py   vision_service 노드
 ├─ hw/camera_controller/run_controller.py     camera_controller 노드 (Serial → Arduino)
 └─ hw/camera_streamer/run_streamer.py         UDP 영상 송출 (TCP 노드 아님)
 ```
 
-- `common/`(protocol, node_client, config)과 `config/`는 아직 `service/jarvis_control_service/` 안에 있다. 다른 폴더의 run 파일은 이 경로를 `sys.path`에 넣어 import한다.
-- import 기준은 `service/jarvis_control_service/`이다 (`python3 -m hub`, `python3 run_hub.py`).
-- DB 파일은 `service/jarvis_control_service/db/hub.db`.
+- `common/`은 저장소 최상위에 있다. 각 폴더의 run 파일은 저장소 최상위(`aiot_repo_3/`)를 `sys.path` 맨 앞에 넣고 `from common... import`한다.
+  이 폴더 안에서는 `hub/__init__.py`, `tools/__init__.py`가 그 경로를 넣는다.
+- control 실행은 여전히 이 폴더에서 한다 (`python3 -m hub`, `python3 run_hub.py`).
+- 모든 노드가 같이 쓰는 설정은 최상위 `config/common.yaml`, control 전용 설정은 이 폴더의 `config/control.yaml`. control 전용 경로·설정을 `common/`에 넣지 않는다.
 - `run_client.py`(이 폴더)는 노드 템플릿 실행용. 학생 화면은 `gui/student_client/run_client.py`.
 
 아직 하지 않은 이동 (확정되면):
 
 | 현재 | 목표 |
 | --- | --- |
-| `hub/hub.py`, `hub/db.py`, `hub/event_manager.py` | `hub_server.py`, `db.py`, `event_manager.py` (이 폴더 바로 아래) |
-| `common/` | 최상위 `common/` — Project Structure에 없는 추가 제안이라 강사님 확인 필요 |
+| `hub/hub.py`, `hub/db.py`, `hub/event_manager.py`, `hub/control_config.py` | `hub_server.py`, `db.py`, `event_manager.py` … (이 폴더 바로 아래) |
 | `tests/test_event_manager.py` | (위치 미정) |
 
 ## 실행 / 시험

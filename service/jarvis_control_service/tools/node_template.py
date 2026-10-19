@@ -11,10 +11,11 @@ import sys
 import time
 from pathlib import Path
 
-# 어느 폴더로 복사해도 common/ 을 찾을 수 있게 한다
+# 어느 폴더로 복사해도 저장소 최상위(aiot_repo_3/, common/ 이 있는 곳)를 찾을 수 있게 한다
 _here = Path(__file__).resolve().parent
 for _p in (_here, *_here.parents):
-    if (_p / "common" / "node_client.py").exists():
+    if (_p / "common" / "node_client.py").exists() and (_p / "config" / "common.yaml").exists() \
+            and (_p / "service").is_dir():
         sys.path.insert(0, str(_p))
         break
 

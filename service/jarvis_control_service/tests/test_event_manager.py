@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from common.config import CONTROL_DEFAULTS            # noqa: E402
+from hub.control_config import CONTROL_DEFAULTS       # noqa: E402
 from hub.event_manager import EventManager            # noqa: E402
 
 T0 = 1000.0

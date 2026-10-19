@@ -19,10 +19,11 @@ import logging
 import time
 from dataclasses import dataclass
 
-from common.config import DB_PATH, load_config, load_control_config
+from common.config import load_config
 from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
                              INCIDENT_TYPES, NOT_LOGGED_TYPES, MessageError, encode,
                              make_message, parse_message, student_seat)
+from hub.control_config import DB_PATH, load_control_config
 from hub.db import Database, SchemaMismatch
 from hub.event_manager import Effects, EventManager, HelpEvent
 

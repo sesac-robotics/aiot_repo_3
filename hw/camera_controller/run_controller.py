@@ -17,8 +17,8 @@ import sys
 import time
 from pathlib import Path
 
-# common/ 은 service/jarvis_control_service/ 안에 있다
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "service" / "jarvis_control_service"))
+# common/ 은 저장소 최상위(aiot_repo_3/)에 있다
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from common.config import load_config          # noqa: E402
 from common.node_client import NodeClient      # noqa: E402

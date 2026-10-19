@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 if __package__ in (None, ""):                 # tools/fake_node.py 를 직접 실행한 경우
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))   # aiot_repo_3/ (common/)
 
 from common.config import load_config          # noqa: E402
 from common.node_client import NodeClient      # noqa: E402
