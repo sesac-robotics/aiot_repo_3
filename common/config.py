@@ -1,21 +1,24 @@
 """
-설정 읽기: config/common.yaml (hub IP·포트). 관제 노트북 IP는 여기서만 바꾼다.
+공통 설정 읽기: aiot_repo_3/config/common.yaml (control IP·포트). 모든 노드가 같이 쓴다.
+관제 노트북 IP는 여기서만 바꾼다.
 
 PyYAML 이 있으면 그걸 쓰고, 없으면 "키: 값" 한 줄짜리만 읽는 간단한 파서로 읽는다.
 명령줄 옵션(--server, --port)을 load_config(...) 에 넘기면 그게 이긴다.
+옛 키 hub_host / hub_port 도 계속 읽는다. load_config() 결과에는 두 이름이 모두 들어 있다.
+
+control 전용 설정(control.yaml, DB 경로)은 service/jarvis_control_service/hub/control_config.py 에 있다.
 """
 
 import ast
 from pathlib import Path
 
-from common.message import DEFAULT_PORT
+from common.protocol import DEFAULT_PORT
 
-ROOT = Path(__file__).resolve().parent.parent        # src/
-CONFIG_DIR = ROOT / "config"
+REPO_ROOT = Path(__file__).resolve().parent.parent    # aiot_repo_3/
+CONFIG_DIR = REPO_ROOT / "config"
 COMMON_CONFIG = CONFIG_DIR / "common.yaml"
-DB_PATH = ROOT / "hub.db"                             # 어디서 실행해도 src/hub.db
 
-DEFAULTS = {"hub_host": "127.0.0.1", "hub_port": DEFAULT_PORT, "log_level": "INFO"}
+DEFAULTS = {"control_host": "127.0.0.1", "control_port": DEFAULT_PORT, "log_level": "INFO"}
 
 
 def _parse_scalar(text: str):
@@ -58,8 +61,19 @@ def read_file(path: Path) -> dict:
 
 
 def load_config(**overrides) -> dict:
+    """common.yaml. 키 이름은 control_host / control_port (옛 hub_host / hub_port 도 읽음)."""
     cfg = dict(DEFAULTS)
     if COMMON_CONFIG.exists():
-        cfg.update(read_file(COMMON_CONFIG))
+        file_cfg = read_file(COMMON_CONFIG)
+        for old, new in (("hub_host", "control_host"), ("hub_port", "control_port")):
+            if old in file_cfg and new not in file_cfg:
+                file_cfg[new] = file_cfg[old]
+        cfg.update(file_cfg)
+    # 옛 이름으로 넘긴 옵션도 받는다
+    for old, new in (("hub_host", "control_host"), ("hub_port", "control_port")):
+        if overrides.get(old) is not None and overrides.get(new) is None:
+            overrides[new] = overrides[old]
+        overrides.pop(old, None)
     cfg.update({k: v for k, v in overrides.items() if v is not None})
+    cfg["hub_host"], cfg["hub_port"] = cfg["control_host"], cfg["control_port"]   # 옛 코드용
     return cfg
