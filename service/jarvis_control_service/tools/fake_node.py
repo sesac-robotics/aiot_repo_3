@@ -15,7 +15,7 @@
 
 접속 후 2초마다 heartbeat 는 NodeClient 가 알아서 보낸다 (node_status 표).
 
-실행 (server/control 폴더에서):
+실행 (service/jarvis_control_service 폴더에서):
     python3 -m tools.fake_node                       # scenario
     python3 -m tools.fake_node --node instructor_console --server 127.0.0.1
 VS Code Run Code(▶)로는 이 파일을 직접 실행하고, 모드는 아래 NODE 로 고른다.
@@ -155,7 +155,7 @@ def run_scenario(cfg: dict, fall_wait_s: float):
         console.client.send("resolve", value={"event_id": q_id})
         console.wait_for("queue_state", lambda v: v["active"] is None and not v["waiting"])
         nodes[CAMERA_NODE].wait_for("pan_tilt", lambda v: v.get("mode") == "home")
-        print("\n성공: 질문 1건 + 쓰러짐 선점이 끝까지 흘렀습니다. (DB: hub.db 의 help_event, event_log)")
+        print("\n성공: 질문 1건 + 쓰러짐 선점이 끝까지 흘렀습니다. (DB: db/hub.db 의 help_event, event_log)")
         return True
     except TimeoutError as e:
         print(f"\n실패: {e}")

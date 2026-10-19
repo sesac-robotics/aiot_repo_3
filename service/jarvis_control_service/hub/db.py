@@ -2,7 +2,7 @@
 SQLite 기록. DB 에 쓰는 곳은 여기 한 곳이다 (hub 프로세스 하나만 쓴다).
 WAL 모드로 열어, 다른 프로그램(DB 뷰어)이 읽는 동안에도 기록이 막히지 않게 한다.
 
-스키마 원본은 db/create.sql (시작할 때 실행).
+스키마 원본은 service/jarvis_DB/create.sql (시작할 때 실행).
 - nodes       : 노드별 접속 PC (호스트 이름, IP, OS)
 - messages    : 노드가 보낸 원본 메시지 (heartbeat, track_offset 제외)
 - node_status : 노드별 최신 하트비트 (fps, cpu, cam1_fps, cam2_fps) + online
@@ -29,6 +29,7 @@ class SchemaMismatch(RuntimeError):
 class Database:
     def __init__(self, path, create_sql: Path = CREATE_SQL):
         self.path = path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")

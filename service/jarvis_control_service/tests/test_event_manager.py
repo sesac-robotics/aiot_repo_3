@@ -2,7 +2,7 @@
 event_manager 단위 테스트 (상세 설계 9장 "단위"): 가짜 시계로 사건을 순서대로 넣는다.
 확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 추적 nudge
 
-실행 (server/control 폴더에서):  python3 -m unittest discover -s tests -v
+실행 (service/jarvis_control_service 폴더에서):  python3 -m unittest discover -s tests -v
 """
 
 import copy

@@ -19,12 +19,12 @@ from common.protocol import DEFAULT_PORT
 
 log = logging.getLogger("config")
 
-ROOT = Path(__file__).resolve().parent.parent        # server/control/
+ROOT = Path(__file__).resolve().parent.parent        # service/jarvis_control_service/
 CONFIG_DIR = ROOT / "config"
 COMMON_CONFIG = CONFIG_DIR / "common.yaml"
 CONTROL_CONFIG = CONFIG_DIR / "control.yaml"
-DB_PATH = ROOT / "hub.db"                             # 어디서 실행해도 server/control/hub.db
-CREATE_SQL = ROOT / "db" / "create.sql"               # 스키마 원본 (db.py 가 시작할 때 실행)
+DB_PATH = ROOT / "db" / "hub.db"                      # 어디서 실행해도 service/jarvis_control_service/db/hub.db
+CREATE_SQL = ROOT.parent / "jarvis_DB" / "create.sql"  # 스키마 원본 service/jarvis_DB/create.sql (db.py 가 시작할 때 실행)
 
 DEFAULTS = {"control_host": "127.0.0.1", "control_port": DEFAULT_PORT, "log_level": "INFO"}
 

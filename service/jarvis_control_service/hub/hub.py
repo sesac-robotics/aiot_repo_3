@@ -10,7 +10,7 @@ control(hub) TCP 서버 (상세 설계 0·5·6장)
 - 0.1초마다 event_manager.tick(now) (control 시계)
 - 하트비트가 6초(3회) 안 오면 offline -> device_update
 
-실행 (server/control 폴더에서):  python3 -m hub [--host 0.0.0.0] [--port 5000] [--db 경로] [-v]
+실행 (service/jarvis_control_service 폴더에서):  python3 -m hub [--host 0.0.0.0] [--port 5000] [--db 경로] [-v]
 """
 
 import argparse
@@ -237,7 +237,7 @@ def main():
                     help="열어 둘 주소 (기본 0.0.0.0 = 이 노트북의 모든 네트워크)")
     ap.add_argument("--port", type=int, default=None,
                     help="기본: config/common.yaml 의 control_port")
-    ap.add_argument("--db", default=str(DB_PATH), help="기본: server/control/hub.db")
+    ap.add_argument("--db", default=str(DB_PATH), help="기본: service/jarvis_control_service/db/hub.db")
     ap.add_argument("-v", "--verbose", action="store_true", help="주고받은 메시지 전부 출력")
     args = ap.parse_args()
     port = args.port or int(load_config().get("control_port", DEFAULT_PORT))

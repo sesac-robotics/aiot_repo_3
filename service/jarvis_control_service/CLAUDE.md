@@ -13,31 +13,31 @@
 - **DB에 쓰는 곳은 `db.py`뿐이다.** 다른 도구는 읽기만 한다. DB는 SQLite 파일 하나.
 - LLM 상황 설명: Gemini API가 기본, Ollama가 백업.
 
-## 현재 파일 → 목표 위치
+## 폴더 구조
 
-설계(이름 규칙, 메시지, event_manager, DB)는 구현되어 있다. **폴더 이동만 아직 안 했다.**
-지금은 `server/control/` 안에서 돌아가고, import 기준은 `server/control/`이다 (`python3 -m hub`, `python3 run_hub.py`).
-확정 Project Structure로 옮길 때 아래 표대로 옮긴다.
+```
+aiot_repo_3/
+├─ gui/instructor_console/run_console.py      instructor_console 노드 (강사 대시보드)
+├─ gui/student_client/run_client.py           student_client_N 노드 (--seat N)
+├─ service/jarvis_control_service/            control 서버 (이 폴더)
+├─ service/jarvis_DB/create.sql               DB 스키마 원본 (db.py 가 시작할 때 실행)
+├─ service/jarvis_vision_service/run_assistant.py   vision_service 노드
+├─ hw/camera_controller/run_controller.py     camera_controller 노드 (Serial → Arduino)
+└─ hw/camera_streamer/run_streamer.py         UDP 영상 송출 (TCP 노드 아님)
+```
 
-| 현재 (`server/control/`) | 목표 (`aiot_repo_3/` 기준) |
+- `common/`(protocol, node_client, config)과 `config/`는 아직 `service/jarvis_control_service/` 안에 있다. 다른 폴더의 run 파일은 이 경로를 `sys.path`에 넣어 import한다.
+- import 기준은 `service/jarvis_control_service/`이다 (`python3 -m hub`, `python3 run_hub.py`).
+- DB 파일은 `service/jarvis_control_service/db/hub.db`.
+- `run_client.py`(이 폴더)는 노드 템플릿 실행용. 학생 화면은 `gui/student_client/run_client.py`.
+
+아직 하지 않은 이동 (확정되면):
+
+| 현재 | 목표 |
 | --- | --- |
-| `common/protocol.py` | `common/protocol.py` — 노드·메시지 종류·좌석의 유일한 기준 |
-| `common/node_client.py` | `common/node_client.py` — `NodeClient` |
-| `common/message.py`, `common/client.py` | 옛 이름 호환용 연결 파일. 다른 노드 코드가 새 이름으로 바뀌면 삭제 |
-| `common/config.py` | `common/config.py` |
-| `config/common.yaml` | `config/common.yaml` (control_host, control_port. 옛 hub_host/hub_port 도 읽음) |
-| `run_hub.py` | `service/jarvis_control_service/run_hub.py` (진입점) |
-| `hub/hub.py` | `service/jarvis_control_service/hub_server.py` |
-| `hub/db.py` | `service/jarvis_control_service/db.py` |
-| `hub/event_manager.py` | `service/jarvis_control_service/event_manager.py` |
-| `config/control.yaml` | `service/jarvis_control_service/config/control.yaml` |
-| `db/create.sql` | `service/jarvis_DB/create.sql` |
-| `run_client.py` | (노드 템플릿 실행용. 학생 화면은 `gui/student_client/run_client.py`로 새로 만듦) |
-| `tools/` | `tools/` (node_template.py, fake_node.py) |
+| `hub/hub.py`, `hub/db.py`, `hub/event_manager.py` | `hub_server.py`, `db.py`, `event_manager.py` (이 폴더 바로 아래) |
+| `common/` | 최상위 `common/` — Project Structure에 없는 추가 제안이라 강사님 확인 필요 |
 | `tests/test_event_manager.py` | (위치 미정) |
-
-- 이동 후 import 기준은 저장소 최상위(`aiot_repo_3/`). 실행 예: `python -m service.jarvis_control_service.run_hub`
-- 최상위 `common/` 폴더는 Project Structure에 없는 추가 제안이라 강사님 확인 필요.
 
 ## 실행 / 시험
 
@@ -48,7 +48,7 @@ python3 -m tools.fake_node --server 127.0.0.1       # 통신 시나리오: 질�
 python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fall_alert 까지
 ```
 
-- `SchemaMismatch` 오류가 나면 `hub.db`, `hub.db-wal`, `hub.db-shm`을 지우고 다시 실행한다. 스키마를 바꾸면 `db.py`의 `SCHEMA_VERSION`을 올린다.
+- `SchemaMismatch` 오류가 나면 `db/hub.db`, `db/hub.db-wal`, `db/hub.db-shm`을 지우고 다시 실행한다. 스키마를 바꾸면 `db.py`의 `SCHEMA_VERSION`을 올린다.
 
 ## 코드 구조 (판단과 실행의 분리)
 
@@ -253,7 +253,7 @@ CREATE TABLE IF NOT EXISTS event_log (
 - `cameras`, `seats`(노드 보고 방식) 폐지. 좌석은 yaml → `seat` 테이블.
 
 - 이름과 영상은 저장하지 않는다. 학생은 좌석 번호로만 구분.
-- 스키마를 바꾸면 개발 중에는 `hub.db`를 지우고 다시 만든다. 마이그레이션 안 함.
+- 스키마를 바꾸면 개발 중에는 `db/hub.db`를 지우고 다시 만든다. 마이그레이션 안 함.
 
 ## 구현 규칙
 
