@@ -4,8 +4,7 @@ control 전용 설정과 경로 (상세 설계 6.4, 7장). control 만 읽는다
 - db/hub.db           : SQLite DB 파일
 - service/jarvis_DB/create.sql : 스키마 원본 (db.py 가 시작할 때 실행)
 
-control.yaml 은 중첩 구조라 PyYAML 이 꼭 필요하다. 없으면 시작하지 않는다
-(측정한 좌석 각도가 조용히 무시되지 않게). control.yaml 파일 자체가 없을 때만 CONTROL_DEFAULTS 를 쓴다.
+control.yaml 은 중첩 구조라 PyYAML 이 없으면 아래 CONTROL_DEFAULTS 를 쓴다.
 모든 노드가 같이 쓰는 설정(common.yaml)은 최상위 common/config.py 에 있다.
 """
 
@@ -20,7 +19,7 @@ CONTROL_CONFIG = SERVICE_DIR / "config" / "control.yaml"
 DB_PATH = SERVICE_DIR / "db" / "hub.db"
 CREATE_SQL = SERVICE_DIR.parent / "jarvis_DB" / "create.sql"
 
-# control.yaml 이 없을 때 쓰는 값 (테스트도 이 값을 쓴다)
+# control.yaml 이 없거나 PyYAML 이 없을 때 쓰는 값
 CONTROL_DEFAULTS = {
     "seats": {
         1: {"pan": 60, "tilt": 85, "neighbors": [2]},
@@ -38,10 +37,6 @@ CONTROL_DEFAULTS = {
     },
     "track": {"nudge_max_hz": 10, "nudge_gain": 8.0},
 }
-
-
-class ConfigError(RuntimeError):
-    pass
 
 
 def _merge(base: dict, extra: dict) -> dict:
@@ -62,8 +57,8 @@ def load_control_config(path: Path = CONTROL_CONFIG) -> dict:
     try:
         import yaml
     except ImportError:
-        raise ConfigError(f"PyYAML 미설치 - {path} 를 읽을 수 없습니다. "
-                          f"pip install -r requirements.txt (또는 pip install pyyaml)") from None
+        log.warning("PyYAML 미설치 - %s 대신 기본값 사용 (pip install pyyaml)", path)
+        return copy.deepcopy(CONTROL_DEFAULTS)
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     cfg = _merge(CONTROL_DEFAULTS, data)

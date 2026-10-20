@@ -70,7 +70,7 @@ class NodeClient:
 
     def set_status(self, **fields):
         """하트비트에 같이 실을 값. 예: set_status(cam1_fps=15.0, cam2_fps=14.2)"""
-        self._status = {**self._status, **fields}   # 새 dict 로 바꿔 끼움 (하트비트 스레드가 읽는 중이어도 안전)
+        self._status.update(fields)
 
     def set_info(self, info: dict):
         """노드 부가 정보. 접속(재접속 포함)할 때마다 node_info 로 한 번 보낸다.
@@ -84,10 +84,6 @@ class NodeClient:
         with self._lock:
             self._seq += 1
             msg = make_message(self.node, self._seq, type_, seat, value, conf)
-            if self._sock is None:             # 끊겼거나 재접속 중(밀린 것 보내는 중): 순서대로 뒤에 붙인다
-                if type_ in BUFFERED_TYPES:
-                    self._pending.append(msg)
-                return False
         if self._write(msg):
             return True
         if type_ in BUFFERED_TYPES:
@@ -129,14 +125,12 @@ class NodeClient:
                 self._stop.wait(RECONNECT_INTERVAL_S)
                 continue
 
-            if not self._handshake(sock):
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-                self._stop.wait(RECONNECT_INTERVAL_S)
-                continue
+            with self._lock:
+                self._sock = sock
             log.info("control 접속: %s:%d (node=%s)", self.host, self.port, self.node)
+            self._send_heartbeat()             # 첫 메시지로 노드 등록
+            self._send_node_info()             # 이 PC 정보 + set_info 값
+            self._flush_pending()
             self._recv_loop(sock)              # 끊길 때까지 여기서 대기
             self._close()
             if not self._stop.is_set():
@@ -168,57 +162,37 @@ class NodeClient:
                     except Exception:
                         log.exception("on_message 처리 중 오류")
 
-    def _handshake(self, sock: socket.socket) -> bool:
-        """하트비트(노드 등록) -> node_info -> 밀린 메시지 를 보낸 뒤에야 self._sock 을 연다.
-        그동안 다른 스레드의 send() 는 _pending 뒤에 붙으므로 순서가 바뀌지 않는다
-        (밀린 start 보다 새 end 가 먼저 가는 일이 없다)."""
-        with self._lock:
-            try:
-                for type_, value in (("heartbeat", self._heartbeat_value()),
-                                     ("node_info", self._node_info_value(sock))):
-                    self._seq += 1
-                    sock.sendall(encode(make_message(self.node, self._seq, type_, None, value)))
-                while self._pending:
-                    msg = self._pending[0]
-                    sock.sendall(encode(msg))
-                    self._pending.popleft()
-                    log.info("밀린 사건 전송: %s seq=%d", msg["type"], msg["seq"])
-            except OSError as e:
-                log.warning("접속 직후 전송 실패: %s", e)
-                return False
-            self._sock = sock
-        return True
+    def _flush_pending(self):
+        while self._pending:
+            msg = self._pending.popleft()
+            if not self._write(msg):
+                self._pending.appendleft(msg)
+                return
+            log.info("밀린 사건 전송: %s seq=%d", msg["type"], msg["seq"])
 
-    def _pc_info(self, sock: socket.socket | None = None) -> dict:
+    def _pc_info(self) -> dict:
         """이 클라이언트가 돌아가는 PC를 구별할 정보."""
         ip = None
-        if sock is not None:
-            try:
-                ip = sock.getsockname()[0]     # control 쪽으로 나가는 내 IP
-            except OSError:
-                pass
+        with self._lock:
+            if self._sock is not None:
+                try:
+                    ip = self._sock.getsockname()[0]   # control 쪽으로 나가는 내 IP
+                except OSError:
+                    pass
         return {"hostname": socket.gethostname(), "ip": ip,
                 "os": f"{platform.system()} {platform.release()}",
                 "python": platform.python_version(), "pid": os.getpid()}
 
-    def _node_info_value(self, sock: socket.socket | None) -> dict:
-        return {**(self._info or {}), "pc": self._pc_info(sock)}
-
     def _send_node_info(self):
-        with self._lock:
-            sock = self._sock
-        self.send("node_info", value=self._node_info_value(sock))
+        self.send("node_info", value={**(self._info or {}), "pc": self._pc_info()})
 
-    def _heartbeat_value(self) -> dict:
+    def _send_heartbeat(self):
         try:
             cpu = os.getloadavg()[0] / (os.cpu_count() or 1)
         except (OSError, AttributeError):      # Windows 등
             cpu = None
-        return {**self._status, "fps": round(self._fps, 1),
-                "cpu": None if cpu is None else round(cpu, 2)}
-
-    def _send_heartbeat(self):
-        self.send("heartbeat", value=self._heartbeat_value())
+        self.send("heartbeat", value={**self._status, "fps": round(self._fps, 1),
+                                      "cpu": None if cpu is None else round(cpu, 2)})
 
     def _heartbeat_loop(self):
         while not self._stop.wait(HEARTBEAT_INTERVAL_S):

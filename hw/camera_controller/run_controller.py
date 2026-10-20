@@ -4,7 +4,7 @@ camera_controller 노드 실행 파일. VS Code에서 이 파일을 열고 Run C
 
 control 의 pan_tilt 명령을 Serial 로 Arduino 에 전달하고, 적용 결과를 pan_tilt_state 로 돌려준다.
 시리얼 포트는 이 노드만 잡는다.
-- {"mode":"preset","seat":2,"pan":80,"tilt":85} : 좌석 프리셋 (각도는 control 이 control.yaml 에서 읽어 실어 보냄)
+- {"mode":"preset","seat":2}            : 좌석 프리셋 (각도는 control 이 control.yaml 에서 정함)
 - {"mode":"nudge","dpan":1.5,"dtilt":-0.8} : 지금 각도에서 조금 움직임
 - {"mode":"home"}                       : 기본 위치
 
