@@ -4,7 +4,7 @@ student_client 폴더에서 실행 (먼저 수신기를 켠다: python -m seat_l
   python -m monitor.seat_link_main --server 127.0.0.1 --port 6000 --seat 1 --interval 2
 monitor.monitor_main의 옵션(--rule, --img-every 등)도 그대로 쓸 수 있다.
 판정은 monitor_main.Monitor를 그대로 쓰고, 패킷 형식은 seat_link/packet.py가 맡는다.
-키: c 기준 자세 다시 저장, ESC 종료
+키: c 기준 자세 다시 저장, z 영역 다시 측정, Space 영역 측정 시작, ESC 종료
 """
 import argparse
 import logging
@@ -15,7 +15,8 @@ import cv2
 
 from monitor.condition import ConditionLatch
 from monitor.display import WHITE, YELLOW
-from monitor.monitor_main import Monitor, parse_args
+from monitor.monitor_args import parse_args
+from monitor.monitor_main import Monitor
 from seat_common.korean_text import TextRenderer
 from seat_link import packet
 from seat_link.sender import PacketSender
@@ -72,14 +73,13 @@ def main():
                 sender.send(packet.encode(link.seat, last))
                 t_send = now
             lines.append(link_line(sender, last, link))
-            lines.append((f"c: 기준 자세 다시 저장  |  ESC: 종료  |  {fps:.0f} fps", WHITE))
+            lines.append((f"c: 기준 자세 다시 저장  |  z: 영역 다시 측정  |  ESC: 종료  |  {fps:.0f} fps", WHITE))
             text.draw_lines(frame, lines)
             cv2.imshow("seat monitor (link)", frame)
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
                 break
-            if key == ord("c"):
-                monitor.recalibrate(now)
+            monitor.handle_key(key, now)
     finally:
         sender.stop()
         cap.release()

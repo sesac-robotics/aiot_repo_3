@@ -62,6 +62,7 @@ class FaceEnsemble:
         self.n = 0                  # 얼굴이 있던 프레임 수 (이미지 갱신 주기용)
         self.last_t = None
         self.last = None            # (클래스 이름, 확률, 이미지 반영 여부)
+        self.parts = (None, None)   # 마지막 (시간 흐름 확률, 영역 연결 후 이미지 확률) — 화면 확인용
         self.ms = 0.0               # 마지막 판정 시간 (밀리초)
 
     def set_zones(self, zones):
@@ -102,10 +103,11 @@ class FaceEnsemble:
             self.pc = self._image_probs(img)
         self.n += 1
         if self.pc is None:
-            p = pt
+            p, pc = pt, None
         else:
             pc = zone_gate(self.pc[None], x[None], yaw_tol=self.gate_yaw)[0]
             p = (1 - self.w) * pt + self.w * pc
+        self.parts = (pt, pc)
         k = int(p.argmax())
         self.last = (FACE_CLASSES[k], float(p[k]), self.pc is not None)
         self.ms = (time.perf_counter() - t0) * 1000
