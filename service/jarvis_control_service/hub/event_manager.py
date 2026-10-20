@@ -240,8 +240,7 @@ class EventManager:
             if node == VISION_NODE:
                 self._send(VISION_NODE, "track_target", {"seat": ev.seat if ev else None})
             elif node == CAMERA_NODE:
-                self._send(CAMERA_NODE, "pan_tilt",
-                           {"mode": "preset", "seat": ev.seat} if ev else {"mode": "home"})
+                self._send(CAMERA_NODE, "pan_tilt", self._preset(ev.seat if ev else None))
         return self._flush()
 
     def snapshot(self) -> dict:
@@ -329,13 +328,19 @@ class EventManager:
         if seat != self._target_seat:
             self._target_seat = seat
             self._send(VISION_NODE, "track_target", {"seat": seat})
-            self._send(CAMERA_NODE, "pan_tilt",
-                       {"mode": "preset", "seat": seat} if seat is not None else {"mode": "home"})
+            self._send(CAMERA_NODE, "pan_tilt", self._preset(seat))
         q = self._queue_value()
         key = (q["active"], tuple(q["waiting"]))
         if key != self._last_queue:
             self._last_queue = key
             self._send(CONSOLE_NODE, "queue_state", q)
+
+    def _preset(self, seat: int | None) -> dict:
+        """pan_tilt 명령. 각도는 control.yaml 에만 있으므로 여기서 같이 실어 보낸다."""
+        if seat is None:
+            return {"mode": "home"}
+        s = self.seats.get(seat, {})
+        return {"mode": "preset", "seat": seat, "pan": s.get("pan"), "tilt": s.get("tilt")}
 
     def _confirm(self, ev: HelpEvent, now: float, by: str):
         if ev.confirmed_at is not None:

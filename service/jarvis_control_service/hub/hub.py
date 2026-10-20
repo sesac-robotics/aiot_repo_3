@@ -23,7 +23,7 @@ from common.config import load_config
 from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
                              INCIDENT_TYPES, NOT_LOGGED_TYPES, MessageError, encode,
                              make_message, parse_message, student_seat)
-from hub.control_config import DB_PATH, load_control_config
+from hub.control_config import DB_PATH, ConfigError, load_control_config
 from hub.db import Database, SchemaMismatch
 from hub.event_manager import Effects, EventManager, HelpEvent
 
@@ -81,7 +81,10 @@ class HubServer:
         """event_manager 가 정한 할 일: DB 기록 -> 전송."""
         if not fx:
             return
-        self.db.apply(fx.saves, fx.logs)
+        try:
+            self.db.apply(fx.saves, fx.logs)
+        except Exception:                  # 기록이 실패해도 화면·장비에는 보낸다 (쓰러짐을 놓치지 않게)
+            log.exception("DB 기록 실패 - 전송은 계속")
         for s in fx.sends:
             await self.send(s.to, s.type, s.value, s.seat)
 
@@ -118,11 +121,14 @@ class HubServer:
                     log.info("노드 등록: %s (%s)", node_name, peer_str)
                     await self.on_connect(node_name, rx_ts)
 
-                await self.on_message(self.nodes[node_name], msg, rx_ts)
+                try:
+                    await self.on_message(self.nodes[node_name], msg, rx_ts)
+                except Exception:          # 메시지 하나의 오류로 연결을 끊지 않는다
+                    log.exception("%s 메시지 처리 중 오류 - 이 메시지만 버림: %s", node_name, msg)
         except (ConnectionError, asyncio.IncompleteReadError) as e:
             log.info("%s 연결 오류: %s", peer, e)
         except Exception:
-            log.exception("%s(%s) 메시지 처리 중 오류 - 연결을 끊음", node_name, peer)
+            log.exception("%s(%s) 연결 처리 중 오류 - 연결을 끊음", node_name, peer)
         finally:
             conn = self.nodes.get(node_name) if node_name else None
             if conn and conn.writer is writer and conn.online:
@@ -247,7 +253,7 @@ def main():
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         server = HubServer(args.host, port, args.db)
-    except SchemaMismatch as e:
+    except (SchemaMismatch, ConfigError) as e:
         log.error("%s", e)
         raise SystemExit(1)
     try:

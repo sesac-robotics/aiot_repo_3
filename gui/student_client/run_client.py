@@ -6,7 +6,7 @@ student_client_N 노드 실행 파일 (학생 화면). VS Code에서 이 파일�
 - 학생이 확인 버튼을 누르면 fall_confirm 을 보낸다. fall_alert_cancel 을 받으면 알림을 내린다.
 - condition_summary(집중 저하·자세 나쁨)를 10초마다 보낸다.
 
-지금은 GUI 대신 터미널에 출력하고, Enter 를 누르면 마지막 알림을 확인한다.
+지금은 GUI 대신 터미널에 출력하고, Enter 를 누르면 떠 있는 알림을 모두 확인한다.
 터미널에서는:  python3 run_client.py --seat 1 [--server 127.0.0.1]
 """
 
@@ -26,19 +26,18 @@ from common.protocol import VALID_SEATS, student_node    # noqa: E402
 SEAT = 1                 # Run Code 로 실행할 때 좌석 번호 (옵션 --seat 가 있으면 그게 우선)
 SUMMARY_INTERVAL_S = 10
 
-alert_seat = None        # 지금 떠 있는 쓰러짐 알림의 좌석
+alert_seats: set[int] = set()   # 지금 떠 있는 쓰러짐 알림의 좌석들 (동시에 여러 명일 수 있음)
 
 
 def on_message(msg: dict):
     """control 이 보낸 메시지 (수신 스레드에서 불림). TODO: GUI 갱신."""
-    global alert_seat
     t, v = msg["type"], msg["value"]
     if t == "fall_alert":
-        alert_seat = v["target_seat"]
-        print(f"<- 쓰러짐 알림: {alert_seat}번 좌석 ({v['stage']}). Enter 로 확인")
-    elif t == "fall_alert_cancel" and v["target_seat"] == alert_seat:
-        print(f"<- 알림 해제: {alert_seat}번 좌석")
-        alert_seat = None
+        alert_seats.add(v["target_seat"])
+        print(f"<- 쓰러짐 알림: {v['target_seat']}번 좌석 ({v['stage']}). Enter 로 확인")
+    elif t == "fall_alert_cancel" and v["target_seat"] in alert_seats:
+        alert_seats.discard(v["target_seat"])
+        print(f"<- 알림 해제: {v['target_seat']}번 좌석")
 
 
 def condition() -> dict:
@@ -72,8 +71,8 @@ def main():
     try:
         while True:
             input()
-            if alert_seat is not None:
-                client.send("fall_confirm", seat=args.seat, value={"target_seat": alert_seat})
+            for target in sorted(alert_seats):
+                client.send("fall_confirm", seat=args.seat, value={"target_seat": target})
     except (KeyboardInterrupt, EOFError):
         pass
     finally:

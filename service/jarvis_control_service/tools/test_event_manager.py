@@ -38,7 +38,7 @@ class EventManagerTest(unittest.TestCase):
         fx = self.start("question", 2, 0)
         self.assertEqual(self.queue(), {"active": 1, "waiting": []})
         self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 2})
-        self.assertEqual(sends(fx, "pan_tilt")[0].value, {"mode": "preset", "seat": 2})
+        self.assertEqual(sends(fx, "pan_tilt")[0].value, {"mode": "preset", "seat": 2, "pan": 80, "tilt": 85})
         self.assertEqual(len(sends(fx, "explain_request")), 1)
         self.assertEqual(len(sends(fx, "event_update")), 1)
         self.assertEqual([l[2] for l in fx.logs], ["detect", "activate"])
@@ -179,7 +179,7 @@ class EventManagerTest(unittest.TestCase):
     def test_camera_reconnect_gets_current_preset(self):
         self.start("question", 4, 0)
         fx = self.m.on_node_online("camera_controller", True, T0 + 1)
-        self.assertEqual(sends(fx, "pan_tilt")[0].value, {"mode": "preset", "seat": 4})
+        self.assertEqual(sends(fx, "pan_tilt")[0].value, {"mode": "preset", "seat": 4, "pan": 120, "tilt": 85})
 
     def test_class_condition_ratio(self):
         self.m.tick(T0)
