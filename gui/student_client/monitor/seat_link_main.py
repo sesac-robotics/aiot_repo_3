@@ -32,7 +32,9 @@ def link_args():
     ap.add_argument("--interval", type=float, default=10.0, help="전송 주기 (초)")
     link, rest = ap.parse_known_args()
     sys.argv = [sys.argv[0]] + rest                 # 나머지는 monitor_main 옵션으로 넘김
-    return link, parse_args()
+    args = parse_args()
+    args.seat = link.seat                           # 전송 좌석 번호 = 기준값 저장 좌석 번호
+    return link, args
 
 
 def link_line(sender, last, link):
@@ -55,7 +57,7 @@ def main():
     cap = cv2.VideoCapture(src)
     if not cap.isOpened():
         raise SystemExit(f"카메라를 열 수 없습니다: {args.source}")
-    monitor.recalibrate(time.monotonic())
+    monitor.start(time.monotonic())
     fps, t_prev = 0.0, time.monotonic()
     t_send, last = t_prev, {}
     try:

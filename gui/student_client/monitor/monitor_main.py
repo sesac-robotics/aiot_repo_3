@@ -4,7 +4,8 @@
   수치 MLP + 이미지 앙상블 6개(배경 제거 3, 실루엣 3) → 가중 결합(이미지 0.6) → 목 꺾임 보정
 --rule을 주면 MediaPipe 규칙만으로 판정한다 (mediapipe_only 기준선과 같은 방식, 비교용).
 얼굴 판정은 기본으로 학습 모델(시간 흐름 ×3 + 이미지 ×2, monitor/face_stage.py)을 쓰고, --face-rule이면 규칙만.
-시작 순서: 바른 자세 10초 → 영역 캘리브레이션(학습 모델이고 --zones 파일이 없을 때, 영역마다 Space) → 모니터링.
+시작: 좌석(--seat) 저장값이 있으면 불러와 바로 모니터링, 없거나 --register면 바른 자세 10초 → 방향 측정(영역마다 Space)
+  → 좌석에 저장 (monitor/calib_flow.py, monitor/seat_store.py).
 손 듦(팔꿈치가 어깨 위, 손목이 귀 위)이면 자세 판정과 얼굴 일부를 멈춘다 (common/hand_raise.py).
 
 프로젝트 루트에서 실행:
@@ -23,13 +24,13 @@ from seat_common.face_features import FaceDetector, compute_face_features, draw_
 from seat_common.face_judge import FACE_LABELS, FaceThresholds, make_face_filter
 from seat_common.hand_raise import FACE_PAUSED, HandRaise, draw_arm_points
 from seat_common.korean_text import TextRenderer
-from seat_common.posture_features import FEATURE_NAMES, PoseDetector, Smoother, compute_features, draw_key_points
+from seat_common.posture_features import PoseDetector, Smoother, compute_features, draw_key_points
 from seat_common.posture_judge import LABELS, Calibrator, DurationFilter, Thresholds, compute_deltas, detect_issues
+from monitor.calib_flow import CalibFlowMixin, SeatCalib
 from monitor.display import RED, WHITE, YELLOW, paste_inputs, pending_text, posture_line, status_line, value_lines
 from monitor.face_stage import FaceStage
 from monitor.monitor_args import parse_args
-
-CALIB_KEYS = FEATURE_NAMES + ("yaw", "pitch")      # 자세 기준 + 정면 고개 각도
+from monitor.seat_store import BASELINE_KEYS as CALIB_KEYS     # 자세 기준 + 정면 고개 각도
 
 
 def load_ensemble(args):
@@ -40,8 +41,8 @@ def load_ensemble(args):
     return PostureEnsemble(args.mlp or DEFAULT_MLP, cnns, args.img_weight, img_every=args.img_every)
 
 
-class Monitor:
-    """프레임 1장 처리: 검출 → 특징 → (캘리브레이션 | 판정) → 표시할 줄"""
+class Monitor(CalibFlowMixin):
+    """프레임 1장 처리: 검출 → 특징 → (캘리브레이션 | 판정) → 표시할 줄. 시작·등록·키는 CalibFlowMixin"""
 
     def __init__(self, args):
         self.ensemble = load_ensemble(args)
@@ -51,7 +52,8 @@ class Monitor:
         self.smoother = Smoother(alpha=0.3)
         self.calib = Calibrator(seconds=args.calib_sec, keys=CALIB_KEYS)
         self.pth = Thresholds(hold_sec=args.posture_hold)
-        self.face_stage = FaceStage(args)
+        self.seat_calib = SeatCalib(args)
+        self.face_stage = FaceStage(args, self.seat_calib)
         self.posture_filter = DurationFilter(self.pth.hold_sec, self.pth.release_sec)
         self.face_filter = make_face_filter(FaceThresholds())
         self.hand = HandRaise()
@@ -80,25 +82,6 @@ class Monitor:
         if self.ensemble is not None:
             self.ensemble.reset()
 
-    def recalibrate(self, now):
-        self.smoother.reset()
-        self.pause_posture()
-        self.face_filter.reset()
-        self.face_stage.reset()
-        self.hand.reset()
-        self.calib.start(now)
-
-    def handle_key(self, key, now):
-        """c 바른 자세 다시 등록, z 영역 다시 측정, Space 영역 측정 시작"""
-        if key == ord("c"):
-            self.recalibrate(now)
-        elif key == ord("z"):
-            self.face_filter.reset()
-            self.face_stage.reset()
-            self.face_stage.restart_zones(now)
-        elif key == ord(" "):
-            self.face_stage.go(now)
-
     def step(self, frame, now):
         h, w = frame.shape[:2]
         need_clean = self.ensemble is not None or self.face_stage.needs_clean_frame
@@ -126,7 +109,7 @@ class Monitor:
             sample = {**p, "yaw": f["yaw"], "pitch": f["pitch"]} if (p_raw and f) else None
             b = self.calib.add(sample, now)
             if b is not None:
-                self.base = b
+                self.on_baseline(b)
             lines = [(f"기준 자세 저장 중: 허리를 펴고 화면 정면을 보세요  {self.calib.remaining(now):.1f}초", YELLOW)]
             if self.calib.message:
                 lines.append((self.calib.message, RED))
@@ -169,7 +152,7 @@ def main():
     cap = cv2.VideoCapture(src)
     if not cap.isOpened():
         raise SystemExit(f"카메라를 열 수 없습니다: {args.source}")
-    monitor.recalibrate(time.monotonic())
+    monitor.start(time.monotonic())
     fps, t_prev = 0.0, time.monotonic()
 
     try:

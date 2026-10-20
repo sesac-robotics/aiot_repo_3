@@ -2,7 +2,8 @@
 
 자세: 기본 학습 모델(v6), --rule이면 MediaPipe 규칙만
 얼굴: 기본 학습 모델(시간 흐름 ×3 + 이미지 ×2, monitor.face_ensemble), --face-rule이면 MediaPipe 규칙만
-영역 기준값: --zones 파일이 있으면 불러오고, 없으면 시작할 때 측정해 그 파일에 저장 (학습 모델일 때만)
+기준값: 좌석(--seat)별로 바른 자세 기준 + 방향 측정값을 저장·불러오기 (monitor/seat_store.py, monitor/calib_flow.py)
+  저장값이 없거나 --register면 시작할 때 등록한다
 """
 import argparse
 from pathlib import Path
@@ -29,8 +30,9 @@ def build_parser():
     ap.add_argument("--face-rule", action="store_true", help="학습 모델 없이 MediaPipe 규칙으로 얼굴 판정 (비교용)")
     ap.add_argument("--face-img-every", type=int, default=3,
                     help="얼굴 이미지 판정을 N프레임마다 갱신 (수집 때 3프레임마다 저장한 것과 같게)")
-    ap.add_argument("--zones", default=str(ROOT / "data" / "zones" / "seat_zones.json"),
-                    help="영역 기준값 파일 (없으면 시작할 때 측정해서 저장)")
+    ap.add_argument("--seat", type=int, default=1, help="좌석 번호 (기준값 저장 단위)")
+    ap.add_argument("--register", action="store_true",
+                    help="저장값이 있어도 바른 자세·방향을 새로 등록 (이후 학생 화면의 등록 버튼)")
     return ap
 
 
