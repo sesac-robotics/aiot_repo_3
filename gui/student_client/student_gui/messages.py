@@ -2,7 +2,9 @@
 
 - 분류: focus 집중 (SP-220), posture 자세 (SP-226), rest 휴식·스트레칭 (SP-228). 분류마다 팝업 색이 다르다.
 - 상태 이름은 판정 쪽 이름을 그대로 쓴다 (seat_common.face_judge, learning.labels).
-- 새 알림은 이 표에 한 줄 추가하고, 판정 상태(Monitor.state)에 그 이름이 나오게 하거나 Notifier.notify(이름)로 부른다.
+- 새 알림은 이 표에 한 줄 추가하고(우선순위도), 판정 상태(Monitor.state)에 그 이름이 나오게 하거나
+  Notifier.notify(이름)로 부른다.
+- 여러 상황이 겹치면 PRIORITY에서 앞에 있는 것 하나만 표시한다 (SP-230).
 """
 
 MESSAGES = {
@@ -14,6 +16,8 @@ MESSAGES = {
     "posture": ("posture", "허리를 펴고 어깨를 내려 볼까요?"),
 }
 
+PRIORITY = ("drowsy", "not_forward", "yawn", "posture")      # 앞일수록 먼저. 표에 없으면 맨 뒤
+
 COLORS = {              # 분류 → 팝업 배경 (Qt 스타일시트는 #RGBA를 못 읽으므로 rgba())
     "focus": "rgba(172, 107, 8, 215)",
     "posture": "rgba(0, 82, 204, 210)",
@@ -24,3 +28,8 @@ COLORS = {              # 분류 → 팝업 배경 (Qt 스타일시트는 #RGBA�
 def message(kind: str):
     """상태 이름 → (분류, 문구). 표에 없으면 None"""
     return MESSAGES.get(kind)
+
+
+def priority(kind: str) -> int:
+    """작을수록 우선 (PRIORITY 순서)"""
+    return PRIORITY.index(kind) if kind in PRIORITY else len(PRIORITY)
