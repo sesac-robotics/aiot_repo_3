@@ -1,7 +1,7 @@
 """실시간 모니터링 실행 옵션 (monitor.monitor_main, monitor.seat_link_main 공용)
 
 자세: 기본 학습 모델(v6), --rule이면 MediaPipe 규칙만
-얼굴: 기본 학습 모델(시간 흐름 ×3 + 이미지 ×2, monitor.face_ensemble), --face-rule이면 MediaPipe 규칙만
+얼굴: 기본 학습 모델(시간 흐름 ×3 + 이미지 ×2(v2) + 근거 보정, monitor.face_ensemble), --face-rule이면 MediaPipe 규칙만
 기준값: 좌석(--seat)별로 바른 자세 기준 + 방향 측정값을 저장·불러오기 (monitor/seat_store.py, monitor/calib_flow.py)
   저장값이 없거나 --register면 시작할 때 등록한다
 """
@@ -30,8 +30,9 @@ def build_parser():
     ap.add_argument("--face-rule", action="store_true", help="학습 모델 없이 MediaPipe 규칙으로 얼굴 판정 (비교용)")
     ap.add_argument("--face-img-every", type=int, default=3,
                     help="얼굴 이미지 판정을 N프레임마다 갱신 (수집 때 3프레임마다 저장한 것과 같게)")
-    ap.add_argument("--face-models", default=str(ROOT / "models" / "face" / "v1"),
-                    help="얼굴 모델 폴더 (이미지 모델 2개; 시간 흐름 모델이 없으면 models/face/v1 것을 사용)")
+    ap.add_argument("--face-models", default=str(ROOT / "models" / "face" / "v2"),
+                    help="얼굴 모델 폴더 (이미지 모델 2개; 시간 흐름 모델이 없으면 models/face/v1 것을 사용). "
+                         "기본 v2 = 새 장소 포함 재학습 (10-21 테스트 구성)")
     ap.add_argument("--no-face-evidence", action="store_true",
                     help="눈 감김·입 벌림으로 졸음·하품을 확인하는 보정을 끔 (비교용)")
     ap.add_argument("--seat", type=int, default=1, help="좌석 번호 (기준값 저장 단위)")

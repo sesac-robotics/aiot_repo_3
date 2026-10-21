@@ -5,9 +5,12 @@
   - 저장값 있음     : 불러와서 바로 모니터링
   - 저장값 없음     : 없는 쪽만 자동으로 등록 후 저장 (바른 자세가 먼저, 이어서 방향 측정)
 키: c 바른 자세만 다시 등록, z 방향만 다시 측정, Space 방향 측정 시작 — 끝나면 해당 값만 덮어쓴다.
-등록 선택은 이후 학생 화면의 등록 버튼(SP-229)이 --register 대신 맡는다.
+학생 화면(student_gui)은 키 대신 아래 공개 함수만 쓴다 (Monitor 내부 이름에 기대지 않게):
+  register(now) 바른 자세 등록 시작, next_zone(now) 방향 측정 다음 단계, zone_step 방향 측정 중인지,
+  labels() 얼굴·자세 한글 이름, seat_calib.on_baseline_saved / on_zones_saved 저장이 끝났을 때 부를 함수
 """
 from monitor.seat_store import open_store
+from seat_common.face_judge import FACE_LABELS
 
 
 class SeatCalib:
@@ -15,6 +18,8 @@ class SeatCalib:
 
     def __init__(self, args):
         self.seat, self.store = args.seat, open_store()
+        self.on_baseline_saved = None          # 저장 끝 알림 (학생 화면): f(baseline dict)
+        self.on_zones_saved = None             # 저장 끝 알림 (학생 화면): f(zones dict)
         baseline, zones = self.store.load(self.seat)
         if args.register:
             baseline = zones = None
@@ -28,11 +33,15 @@ class SeatCalib:
         self.baseline = b
         self.store.save_baseline(self.seat, b)
         print(f"좌석 {self.seat} 바른 자세 기준 저장: {self.store.path(self.seat)}")
+        if self.on_baseline_saved:
+            self.on_baseline_saved(dict(b))
 
     def save_zones(self, zones, warnings=()):
         self.zones = zones
         self.store.save_zones(self.seat, zones, warnings)
         print(f"좌석 {self.seat} 방향 측정값 저장: {self.store.path(self.seat)}")
+        if self.on_zones_saved:
+            self.on_zones_saved(dict(zones))
 
 
 class CalibFlowMixin:
@@ -73,3 +82,21 @@ class CalibFlowMixin:
             self.face_stage.restart_zones(now)
         elif key == ord(" "):
             self.face_stage.go(now)
+
+    # ---- 학생 화면용 공개 함수 --------------------------------------------------
+    def register(self, now):
+        """[자리 등록]: 바른 자세 10초 등록 시작 (방향 측정값이 없으면 끝난 뒤 이어서 측정)"""
+        self.recalibrate(now)
+
+    def next_zone(self, now):
+        """[다음]: 방향 측정 다음 단계 (= Space)"""
+        self.face_stage.go(now)
+
+    @property
+    def zone_step(self):
+        """방향 측정 중이면 True ([다음] 버튼 표시)"""
+        return self.face_stage.zone_calib.active
+
+    def labels(self):
+        """(얼굴 문제 이름 → 한글, 자세 문제 이름 → 한글)"""
+        return dict(FACE_LABELS), dict(self.plabels)
