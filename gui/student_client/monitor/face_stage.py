@@ -20,10 +20,14 @@ class FaceStage:
         self.zone_calib = ZoneCalib()
         self.zones, self.ens = None, None
         if not self.rule:
-            from monitor.face_ensemble import FaceEnsemble       # torch는 학습 모델을 쓸 때만
+            from monitor.face_ensemble import FaceEnsemble, model_paths   # torch는 학습 모델을 쓸 때만
+            from monitor.face_evidence import EvidenceGate
             self.zones = seat_calib.zones
+            seqs, cnns = model_paths(args.face_models)
             self.ens = FaceEnsemble(self.zones or {"screen": {"yaw": 0.0, "pitch": 0.0}},
-                                    img_every=args.face_img_every)
+                                    seqs=seqs, cnns=cnns, img_every=args.face_img_every,
+                                    evidence=None if args.no_face_evidence else EvidenceGate())
+            print(f"얼굴 모델: 시간 흐름 {seqs[0].rsplit('/', 3)[-2]}, 이미지 {cnns[0].rsplit('/', 3)[-2]}")
 
     @property
     def needs_clean_frame(self):
@@ -92,4 +96,7 @@ class FaceStage:
                 continue
             k = int(q.argmax())
             out.append(f"{name} {FACE_KO[FACE_CLASSES[k]]} {q[k]:.2f} (졸음 {q[d]:.2f} 하품 {q[y]:.2f})")
+        ev = self.ens.evidence
+        if ev is not None and ev.note:
+            out.append("보정: " + ev.note)
         return "      " + "  |  ".join(out)

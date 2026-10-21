@@ -39,8 +39,16 @@ def default_paths(names, model_dir=MODEL_DIR):
     return [str(p) for p in paths]
 
 
+def model_paths(model_dir):
+    """모델 폴더 → (시간 흐름 3개, 이미지 2개) 경로. 이미지 모델만 다시 학습한 폴더면 시간 흐름은 기본 폴더(v1) 것을 쓴다"""
+    d = Path(model_dir)
+    seq_dir = d if all((d / n).exists() for n in DEFAULT_SEQS) else MODEL_DIR
+    return default_paths(DEFAULT_SEQS, seq_dir), default_paths(DEFAULT_CNNS, d)
+
+
 class FaceEnsemble:
-    def __init__(self, zones, seqs=None, cnns=None, img_weight=0.7, gate_yaw=5.0, img_every=1, device=None):
+    def __init__(self, zones, seqs=None, cnns=None, img_weight=0.7, gate_yaw=5.0, img_every=1, device=None,
+                 evidence=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.seq_paths = list(seqs) if seqs else default_paths(DEFAULT_SEQS)
         self.cnn_paths = list(cnns) if cnns is not None else default_paths(DEFAULT_CNNS)
@@ -53,6 +61,7 @@ class FaceEnsemble:
         self.tf = face_transform(False)
         self.w, self.gate_yaw, self.img_every = img_weight, gate_yaw, max(1, img_every)
         self.zones = zones
+        self.evidence = evidence    # monitor.face_evidence.EvidenceGate (None = 보정 안 함)
         self.reset()
 
     def reset(self):
@@ -64,6 +73,8 @@ class FaceEnsemble:
         self.last = None            # (클래스 이름, 확률, 이미지 반영 여부)
         self.parts = (None, None)   # 마지막 (시간 흐름 확률, 영역 연결 후 이미지 확률) — 화면 확인용
         self.ms = 0.0               # 마지막 판정 시간 (밀리초)
+        if self.evidence is not None:
+            self.evidence.reset()
 
     def set_zones(self, zones):
         self.zones = zones
@@ -71,7 +82,8 @@ class FaceEnsemble:
 
     def describe(self):
         img = f" + 이미지 ×{len(self.cnns)}" if self.cnns else ""
-        return f"학습 모델 (시간 흐름 ×{len(self.seqs)}{img}, 이미지 {self.w:.1f}, {self.device})"
+        ev = " + 근거 보정" if self.evidence is not None else ""
+        return f"학습 모델 (시간 흐름 ×{len(self.seqs)}{img}, 이미지 {self.w:.1f}{ev}, {self.device})"
 
     @torch.no_grad()
     def _seq_probs(self):
@@ -108,6 +120,8 @@ class FaceEnsemble:
             pc = zone_gate(self.pc[None], x[None], yaw_tol=self.gate_yaw)[0]
             p = (1 - self.w) * pt + self.w * pc
         self.parts = (pt, pc)
+        if self.evidence is not None:
+            p = self.evidence.apply(p, x, now)
         k = int(p.argmax())
         self.last = (FACE_CLASSES[k], float(p[k]), self.pc is not None)
         self.ms = (time.perf_counter() - t0) * 1000
