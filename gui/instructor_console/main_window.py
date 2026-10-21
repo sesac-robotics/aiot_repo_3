@@ -25,6 +25,7 @@ class MainWindow(QMainWindow):
         self.store = Store(self)
         self.link = ControlLink(host, port, self)
         self.link.message.connect(self.store.apply)
+        self.link.message.connect(self.on_message)
         self.link.connected_changed.connect(self.on_connection)
         send = self.send
         self.logs = LogQueries(self.store, self)
@@ -114,6 +115,11 @@ class MainWindow(QMainWindow):
             return True
         self.statusBar().showMessage("Control 서버에 연결되지 않아 보내지 못했습니다 — 연결되면 다시 눌러 주세요", 5000)
         return False
+
+    def on_message(self, name: str, m: dict):
+        """Store 에 담지 않는 응답 (녹화 다시 보기)."""
+        if name == "clip_info":
+            self.home.event_panel.clip.on_clip_info(m)
 
     def on_connection(self, ok: bool):
         self.offline.setVisible(not ok)

@@ -17,10 +17,14 @@ control(hub) TCP 서버 (상세 설계 0·5·6장)
   접속 중인데 condition_summary 가 30초 없으면 경고하고, 1분마다 좌석별 수신 현황을 한 줄로 남긴다.
 - 카메라 영상: camera_streamer 의 UDP(6001/6002)를 저장하지 않고 instructor_console(5011/5012)로 넘긴다
   (hub/video_relay.py). --no-video 면 끈다.
+- [녹화] 이벤트 녹화: event_manager 의 to="recorder" 할 일(start/stop)을 받아 db.py 에 event_clip 행을 만들고
+  (path = "clips/{event_id}.mp4", status 1 녹화 중) ClipRecorder(hub/clip_recorder.py)가 cam2 영상을 MP4 로 쓴다.
+  끝나면 status 2 저장됨 + keep_until(= 종료 + clip_keep_days). 보관 기간이 지나면 파일을 지우고 status 3.
+  강사 화면 clip_request 에는 clip_info 로 답한다. --no-clips 면 녹화만 끈다 (--no-video 면 영상이 없어 같이 꺼짐).
 - 로그는 화면과 logs/hub.log (5MB × 5개 순환) 에 같이 남는다. 학생 수신만 보려면: grep hub.student logs/hub.log
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m hub [--host 0.0.0.0] [--port 5000] [--db 경로] [--log-file 경로] [-v]
-                                                 [--pantilt-port auto|/dev/ttyACM0] [--pantilt-sim] [--no-video]
+                                                 [--pantilt-port auto|/dev/ttyACM0] [--pantilt-sim] [--no-video] [--no-clips]
 """
 
 import argparse
@@ -34,9 +38,10 @@ from common.config import load_config
 from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
                              INCIDENT_TYPES, NOT_LOGGED_TYPES, FrameReader, MessageError, encode,
                              STUDENT_NODES, make_message, parse_message, student_seat)
-from hub.control_config import DB_PATH, SERVICE_DIR, ConfigError, load_control_config
-from hub.db import Database, SchemaMismatch
-from hub.event_manager import PANTILT, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT 추가
+from hub.control_config import (DB_PATH, SERVICE_DIR, ConfigError, clip_abs_path, clip_db_path,
+                                clip_dir, load_control_config)
+from hub.db import CLIP_DELETED, CLIP_RECORDING, CLIP_SAVED, SYSTEM_NODE, Database, SchemaMismatch
+from hub.event_manager import PANTILT, RECORDER, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT, [녹화] RECORDER
 from hub.pantilt import PanTiltService                                    # [팬틸트]
 from hub.video_relay import VideoRelay
 
@@ -50,7 +55,9 @@ STUDENT_REPORT_INTERVAL_S = 60.0             # 좌석별 수신 현황 한 줄 �
 STUDENT_SEND_TYPES = {"fall_alert", "fall_alert_cancel"}
 
 TICK_INTERVAL_S = 0.1
-QUIET_SEND_TYPES = {"track_target", "explain_request", "seat_info"}   # 미접속이어도 경고 안 함 (seat_info 는 접속 시 snapshot 으로 다시 감) ([팬틸트] pan_tilt 는 TCP 로 안 보냄)
+CLIP_CLEANUP_INTERVAL_S = 600.0              # [녹화] 보관 기간 지난 녹화 파일 지우기 주기
+CLIP_STATUS_NAME = {CLIP_RECORDING: "recording", CLIP_SAVED: "saved", CLIP_DELETED: "deleted"}
+QUIET_SEND_TYPES = {"track_target", "explain_request", "seat_info", "clip_info"}   # 미접속이어도 경고 안 함 (seat_info 는 접속 시 snapshot 으로 다시 감) ([팬틸트] pan_tilt 는 TCP 로 안 보냄)
 
 
 @dataclass
@@ -72,13 +79,22 @@ class NodeConn:
 class HubServer:
     def __init__(self, host: str, port: int, db_path, control_cfg: dict | None = None,
                  pantilt_port: str | None = None, pantilt_sim: bool = False,   # [팬틸트] 인자 2개 추가
-                 video: bool = True):
+                 video: bool = True, clips: bool = True):
         self.host, self.port = host, port
         self.db_path = db_path
         self.db = Database(db_path)
         self.db.reset_devices(time.time())
         cfg = control_cfg or load_control_config()
         self.db.sync_seats(cfg["seats"])
+        # [녹화] 설정 + 재시작 전 녹화 중이던 클립 닫기 (파일이 끝까지 안 써졌을 수 있음)
+        self.clip_cfg = cfg.get("clips", {})
+        self.clip_dir = clip_dir(cfg)
+        n = self.db.close_recording_clips(time.time(), self.clip_keep_days())
+        if n:
+            log.warning("재시작 전 녹화 중이던 클립 %d건을 저장됨으로 닫음 (파일 끝이 깨졌을 수 있음)", n)
+        self.clips_enabled = clips and video
+        self.recorder = None                                   # [녹화] run() 에서 루프가 생긴 뒤 만든다
+        self._recording: dict[int, int] = {}                  # [녹화] event_id -> 녹화 중인 clip_id
         open_events = [HelpEvent(**row) for row in self.db.load_open_events()]
         if open_events:
             log.info("재시작 전 열린 이벤트 %d건 복구", len(open_events))
@@ -89,7 +105,8 @@ class HubServer:
         self.pantilt: PanTiltService | None = None                                        # [팬틸트]
         self.pantilt_port = pantilt_port or cfg.get("pantilt", {}).get("port", "auto")   # [팬틸트] control.yaml pantilt.port
         self.pantilt_sim = pantilt_sim                                                    # [팬틸트]
-        self.video = VideoRelay(host, self.console_ip) if video else None   # 영상: streamer -> Console 중계
+        self.video = (VideoRelay(host, self.console_ip, on_frame=self.on_video_frame)   # 영상: streamer -> Console 중계
+                      if video else None)
         self.loop: asyncio.AbstractEventLoop | None = None                               # [팬틸트]
         self._last_report = time.time()
         self._report_counts: dict[str, int] = {}    # 지난 현황 요약 때의 summary_count
@@ -133,6 +150,8 @@ class HubServer:
                 self.call_pantilt(s.type, s.value)               # [팬틸트]
             elif s.to == "db":                                   # [팬틸트] 팬틸트 프리셋 저장 → seat.has_preset
                 self.record_db(s.type, s.value)                  # [팬틸트]
+            elif s.to == RECORDER:                               # [녹화] cam2 녹화 시작·종료
+                self.call_recorder(s.type, s.value, time.time())
             else:
                 await self.send(s.to, s.type, s.value, s.seat)
 
@@ -194,6 +213,104 @@ class HubServer:
                 await self.apply(self.events.on_preset_saved(fields, now))
         except Exception:
             log.exception("팬틸트 이벤트 처리 오류: %s %s", event, fields)
+
+    # ---- [녹화] 이벤트 녹화 -------------------------------------------
+    def clip_keep_days(self) -> float:
+        """보관 일수: 강사 화면 [설정](app_setting.clip_keep_days) > control.yaml clips.keep_days > 7."""
+        default = self.clip_cfg.get("keep_days", 7)
+        try:
+            return float(self.db.get_setting("clip_keep_days", default))
+        except (TypeError, ValueError):
+            log.warning("app_setting.clip_keep_days 값이 숫자가 아님 - %s일 사용", default)
+            return float(default)
+
+    def on_video_frame(self, cam: int, jpeg: bytes, rx_ts: float):
+        """video_relay 가 받은 프레임. 팬틸트 카메라(cam2)만 녹화한다 (큐에 넣기만 함)."""
+        if cam == 2 and self.recorder is not None:
+            self.recorder.feed(jpeg, rx_ts)
+
+    def new_clip_path(self, event_id: int):
+        """clips/{event_id}.mp4. 재시작 등으로 이미 있으면 clips/{event_id}_2.mp4 …"""
+        path, n = self.clip_dir / f"{event_id}.mp4", 1
+        while path.exists():
+            n += 1
+            path = self.clip_dir / f"{event_id}_{n}.mp4"
+        return path
+
+    def call_recorder(self, type_: str, v: dict, now: float):
+        """event_manager 의 to="recorder" 할 일: event_clip 기록(db.py) + ClipRecorder 호출."""
+        if self.recorder is None:
+            return
+        eid = v["event_id"]
+        if type_ == "start":
+            if eid in self._recording:
+                return
+            path = self.new_clip_path(eid)
+            rel = clip_db_path(path)
+            try:
+                clip_id = self.db.start_clip(eid, rel, now)
+                self.db.apply([], [(eid, now, "clip", SYSTEM_NODE,
+                                    {"clip_id": clip_id, "state": "start", "path": rel})])
+            except Exception:
+                log.exception("event %d 녹화 기록 실패 - 녹화하지 않음", eid)
+                return
+            self._recording[eid] = clip_id
+            self.recorder.start(eid, clip_id, path, now)
+        elif type_ == "stop":
+            if self._recording.pop(eid, None) is not None:
+                self.recorder.stop(eid, now)
+        else:
+            log.warning("모르는 녹화 명령: %s", type_)
+
+    def on_clips_done(self):
+        """녹화 스레드에서 불림 -> 루프에서 DB 를 닫는다."""
+        if self.loop is not None and not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.finish_clips)
+
+    def finish_clips(self, results=None):
+        """끝난 녹화: 저장됨(2) + keep_until, 프레임이 없으면 삭제됨(3)."""
+        for r in (self.recorder.drain() if results is None else results):
+            try:
+                if r.frames:
+                    self.db.end_clip(r.clip_id, r.ended_at, self.clip_keep_days())
+                    detail = {"clip_id": r.clip_id, "state": "saved", "frames": r.frames,
+                              "duration_s": round(r.duration_s, 1)}
+                else:
+                    self.db.discard_clip(r.clip_id, r.ended_at)
+                    detail = {"clip_id": r.clip_id, "state": "empty", "error": r.error}
+                self.db.apply([], [(r.event_id, r.ended_at, "clip", SYSTEM_NODE, detail)])
+            except Exception:
+                log.exception("녹화 종료 기록 실패: %s", r)
+
+    def cleanup_clips(self, now: float):
+        """보관 기간(keep_until)이 지난 녹화: 파일 삭제 후 status 3."""
+        for row in self.db.expired_clips(now):
+            path = clip_abs_path(row["path"])
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                log.warning("녹화 파일을 지우지 못함 (%s): %s - 다음에 다시 시도", path, e)
+                continue
+            self.db.mark_clip_deleted(row["clip_id"])
+            log.info("보관 기간 지난 녹화 삭제: event %d %s", row["event_id"], row["path"])
+
+    async def clip_cleanup_loop(self):
+        while True:
+            try:
+                self.cleanup_clips(time.time())
+            except Exception:
+                log.exception("녹화 정리 오류")
+            await asyncio.sleep(CLIP_CLEANUP_INTERVAL_S)
+
+    async def on_clip_request(self, event_id: int):
+        """강사 화면 이벤트 창 '녹화 영상 다시 보기' -> clip_info (Console 은 같은 노트북이라 path 를 직접 연다)."""
+        row = self.db.latest_clip(event_id)
+        if row is None:
+            info = {"event_id": event_id, "status": "none", "started_at": None, "ended_at": None, "path": ""}
+        else:
+            info = {"event_id": event_id, "status": CLIP_STATUS_NAME.get(row["status"], "none"),
+                    "started_at": row["started_at"], "ended_at": row["ended_at"], "path": row["path"]}
+        await self.send(CONSOLE_NODE, "clip_info", info)
 
     # ---- 연결 처리 -----------------------------------------------------
     async def handle_client(self, reader: asyncio.StreamReader,
@@ -369,6 +486,9 @@ class HubServer:
             await self.apply(self.events.on_pan_tilt_jog(int(v["dpan"]), int(v["dtilt"]), rx_ts))
         elif t == "preset_save":                                        # [팬틸트] Console 프리셋 등록 (등록 버튼)
             await self.apply(self.events.on_preset_save(int(v["seat"]), rx_ts))
+        elif t == "clip_request":                                       # [녹화] 이벤트 창 다시 보기
+            if "event_id" in v:
+                await self.on_clip_request(int(v["event_id"]))
         # [팬틸트] pan_tilt_state 분기 삭제 — 팬틸트 상태는 TCP 가 아니라 on_pantilt_event 로 온다
         else:
             log.debug("처리하지 않는 type: %s (%s)", t, conn.name)
@@ -442,13 +562,21 @@ class HubServer:
         self.loop = asyncio.get_running_loop()                                    # [팬틸트]
         self.pantilt = PanTiltService(port=self.pantilt_port, simulate=self.pantilt_sim,
                                       on_event=self.on_pantilt_event)             # [팬틸트] Uno 없어도 Control 은 계속
+        if self.clips_enabled:                                                    # [녹화] events.start() 보다 먼저
+            from hub.clip_recorder import ClipRecorder
+            self.recorder = ClipRecorder(fps=self.clip_cfg.get("fps", 10), notify=self.on_clips_done)
+            log.info("이벤트 녹화: cam2 -> %s (%sfps, 보관 %g일)", self.clip_dir,
+                     self.clip_cfg.get("fps", 10), self.clip_keep_days())
+        else:
+            log.info("이벤트 녹화 꺼짐%s", " (영상 중계가 꺼져 있음)" if not self.video else "")
         await self.apply(self.events.start(time.time()))                          # [팬틸트] 복구된 사건 좌석으로
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         log.info("control 서버 시작: %s:%d (DB: %s)", self.host, self.port, self.db_path)
         if self.video:
             await self.video.start()
         tasks = [asyncio.create_task(self.heartbeat_watchdog()),
-                 asyncio.create_task(self.tick_loop())]
+                 asyncio.create_task(self.tick_loop()),
+                 asyncio.create_task(self.clip_cleanup_loop())]                  # [녹화]
         try:
             async with server:
                 await server.serve_forever()
@@ -458,6 +586,9 @@ class HubServer:
             self.pantilt.close()                                                  # [팬틸트] 정지 + LED 끔
             if self.video:
                 self.video.close()
+            if self.recorder is not None:                                         # [녹화] 파일을 닫고 저장됨으로
+                self.finish_clips(self.recorder.close())
+                self._recording.clear()
             self.db.close()
 
 
@@ -492,7 +623,8 @@ def main():
     ap.add_argument("--pantilt-port", default=None,                                    # [팬틸트]
                     help="Uno 시리얼 포트 (기본: control.yaml pantilt.port, 없으면 auto)")
     ap.add_argument("--pantilt-sim", action="store_true", help="Uno 없이 모의 팬틸트")  # [팬틸트]
-    ap.add_argument("--no-video", action="store_true", help="카메라 영상 중계(UDP 6001/6002) 끄기")
+    ap.add_argument("--no-video", action="store_true", help="카메라 영상 중계(UDP 6001/6002) 끄기 (녹화도 꺼짐)")
+    ap.add_argument("--no-clips", action="store_true", help="이벤트 녹화(cam2 -> service/jarvis_DB/clips) 끄기")
     args = ap.parse_args()
     port = args.port or int(load_config().get("control_port", DEFAULT_PORT))
 
@@ -500,7 +632,7 @@ def main():
     try:
         server = HubServer(args.host, port, args.db,
                            pantilt_port=args.pantilt_port, pantilt_sim=args.pantilt_sim,   # [팬틸트]
-                           video=not args.no_video)
+                           video=not args.no_video, clips=not args.no_clips)
     except (SchemaMismatch, ConfigError) as e:
         log.error("%s", e)
         raise SystemExit(1)

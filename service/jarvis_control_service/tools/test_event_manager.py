@@ -1,6 +1,7 @@
 """
 event_manager 단위 테스트 (상세 설계 9장 "단위"): 가짜 시계로 사건을 순서대로 넣는다.
-확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 팬틸트 연동(preset/home/track, gen)
+확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 팬틸트 연동(preset/home/track, gen),
+      녹화 구간(확정 ~ 종료)
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m unittest tools.test_event_manager -v
 """
@@ -17,6 +18,7 @@ from hub.event_manager import EventManager            # noqa: E402
 
 T0 = 1000.0
 PT = "pantilt"                                        # [팬틸트]
+REC = "recorder"                                      # [녹화]
 
 
 def sends(fx, type_=None, to=None):
@@ -247,6 +249,36 @@ class EventManagerTest(unittest.TestCase):
         self.assertEqual(m2.next_id, 3)
         fx = m2.start(T0 + 2)                                                       # [팬틸트] 재시작 후 팬틸트 복구
         self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 1, "seat": 3, "kind": 1})
+
+        self.assertEqual([s.value["event_id"] for s in sends(fx, "start", REC)], [2, 1])   # [녹화] 열린 이벤트 녹화 재개
+
+    # ---- [녹화] 녹화 구간 = 확정 ~ 완료·오감지·만료·복귀 -------------------------
+    def test_record_starts_on_detect_for_every_event(self):
+        fx1 = self.start("question", 2, 0)
+        fx2 = self.start("away", 4, 1)                  # 대기열로 가도 녹화는 확정 시각부터
+        self.assertEqual(sends(fx1, "start", REC)[0].value, {"event_id": 1, "seat": 2, "kind": "question"})
+        self.assertEqual(sends(fx2, "start", REC)[0].value, {"event_id": 2, "seat": 4, "kind": "away"})
+        self.assertFalse(self.start("question", 2, 2))  # 중복 사건은 새 녹화 없음
+
+    def test_record_not_stopped_by_confirm_preempt_or_end_without_close(self):
+        self.start("question", 2, 0)
+        fxs = [self.start("fall", 3, 1),                                   # 선점
+               self.m.on_confirm(1, T0 + 2, "instructor_console"),
+               self.m.on_incident("question", 2, "end", T0 + 3),          # 손 내림 (닫지 않음)
+               self.m.on_incident("fall", 3, "end", T0 + 4)]              # 일어남 (닫지 않음)
+        self.assertEqual([s for fx in fxs for s in sends(fx, "stop", REC)], [])
+
+    def test_record_stops_on_every_close(self):
+        self.start("question", 1, 0)
+        self.start("fall", 2, 1)
+        self.start("away", 3, 2)
+        self.start("question", 4, 3)
+        cases = [(self.m.on_resolve(1, T0 + 10, "instructor_console"), 1),
+                 (self.m.on_dismiss(2, T0 + 11, "instructor_console"), 2),
+                 (self.m.on_incident("away", 3, "end", T0 + 12), 3),
+                 (self.m.tick(T0 + 3 + self.cfg["timers"]["question_expire_s"]), 4)]   # 만료
+        for fx, eid in cases:
+            self.assertEqual([s.value for s in sends(fx, "stop", REC)], [{"event_id": eid}])
 
 
 if __name__ == "__main__":

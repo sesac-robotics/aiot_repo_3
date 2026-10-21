@@ -12,6 +12,7 @@
 - **카메라 영상은 Control을 거쳐 Vision Service로 간다** (10/21 설계 변경). 두 Camera Streamer(팬틸트·고정) → Control (UDP) → Vision Service (UDP).
   Vision의 판정 결과·사건은 TCP(`NodeClient`)로 Control에 온다.
 - 영상 중계는 판단이 아니다. `event_manager`를 거치지 않고 DB에도 기록하지 않는다. 중계 때문에 asyncio 루프(0.1초 `tick`)가 막히면 안 된다.
+  예외는 **이벤트 녹화**(`event_clip`): 녹화 시작·종료 시점은 `event_manager`가 정하고(`to="recorder"`), cam2 프레임 디코딩·MP4 쓰기는 `hub/clip_recorder.py` 작업 스레드가 한다.
 - **판단(우선순위, 선점, 대기열, 단계 알림, 만료, 추적 대상)은 `event_manager.py` 한 곳에서만 한다.** 화면도 Vision도 판단하지 않는다.
 - **DB에 쓰는 곳은 `db.py`뿐이다.** 다른 도구는 읽기만 한다. DB는 SQLite 파일 하나.
 - LLM 상황 설명: Gemini API가 기본, Ollama가 백업.
@@ -29,12 +30,15 @@ aiot_repo_3/
 ├─ gui/student_client/run_client.py           student_client_N 노드 (--seat N)
 ├─ service/jarvis_control_service/            control 서버 (이 폴더)
 │   ├─ hub/hub.py, event_manager.py, db.py
-│   ├─ hub/control_config.py                  control 전용: control.yaml 읽기, DB·스키마 경로
+│   ├─ hub/control_config.py                  control 전용: control.yaml 읽기, DB·스키마·녹화 경로
+│   ├─ hub/video_relay.py                     UDP 영상 중계 (cam2 프레임은 녹화로도 넘김)
+│   ├─ hub/clip_recorder.py                   이벤트 녹화 (cam2 → MP4, 작업 스레드)
 │   ├─ config/control.yaml                    좌석 각도·옆자리·타이머 (control 만)
 │   ├─ db/hub.db                              SQLite 파일
 │   ├─ tools/
 │   └─ run_hub.py, run_client.py
 ├─ service/jarvis_DB/create.sql               DB 스키마 원본 (db.py 가 시작할 때 실행)
+├─ service/jarvis_DB/clips/{event_id}.mp4     이벤트 녹화 파일 (git 제외, DB event_clip.path = "clips/{event_id}.mp4")
 ├─ service/jarvis_vision_service/run_assistant.py   vision_service 노드
 ├─ hw/camera_controller/camera_controller.ino Uno 펌웨어 (팬틸트는 Control 안의 hub/pantilt 가 USB 시리얼로 직접 움직임)
 └─ hw/camera_streamer/                        UDP 영상 송출 → Control (TCP 노드 아님)
@@ -62,6 +66,7 @@ aiot_repo_3/
 python3 run_hub.py                                  # control 서버 (또는 python3 -m hub -v)
 python3 -m unittest tools.test_event_manager -v     # event_manager 단위 테스트 (가짜 시계)
 python3 -m unittest tools.test_protocol -v          # 바이너리 프레임 단위 테스트 (왕복, 스트림 쪼개짐, CRC, 깨진 바이트)
+python3 -m unittest tools.test_clip_recorder -v     # 이벤트 녹화: 가짜 cam2 JPEG → MP4, event_clip 상태 1→2→3, clip_info, 재시작
 python3 -m tools.fake_node --server 127.0.0.1       # 통신 시나리오: 질문 → 쓰러짐 선점 → confirm/resolve
 python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fall_alert 까지
 ```
@@ -93,6 +98,14 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 - `class_condition`은 최근 30초 안에 보고한 학생만으로 비율을 내고, `reporting`(보고한 수)도 같이 보낸다.
 - 다시 접속한 `vision_service`에는 지금 추적 대상(`track_target`)을 다시 보낸다.
 - `NodeClient`는 끊긴 동안 사건 외에 `confirm`·`resolve`·`fall_confirm`도 모아 두었다가 보낸다.
+- [녹화] 열린 이벤트는 **active든 waiting이든 모두** 확정~종료 구간을 녹화한다 (Data Structure v2 `started_at`=확정, `ended_at`=종료 그대로).
+  팬틸트는 active 좌석만 보므로 waiting 구간 영상은 다른 좌석이 찍힌다. active 구간만 남길지는 팀 논의.
+- [녹화] 같은 cam2 영상을 이벤트마다 따로 파일로 쓴다 (동시 이벤트 2건이면 파일 2개).
+- [녹화] 녹화 시각은 Control 시계(프레임 수신 시각). 10fps 고정, 15fps 입력은 솎고 2초 이하 끊김은 마지막 장면 반복, 그 이상은 이어 붙인다.
+- [녹화] cam2 영상을 한 장도 못 받은 녹화(카메라 꺼짐)는 파일을 만들지 않고 status 3(삭제됨)으로 남긴다.
+- [녹화] 코덱은 `avc1`(H.264)을 먼저 시도하고 안 되면 `mp4v`. pip OpenCV는 보통 `mp4v`가 된다.
+- [녹화] `event_clip.path`는 `service/jarvis_DB` 기준 상대 경로. `clips.dir`을 그 밖으로 바꾸면 절대 경로가 들어간다.
+- [녹화] Control이 강제 종료(kill)되면 녹화 중이던 MP4는 끝이 안 써져 재생이 안 될 수 있다. Ctrl+C 종료는 파일을 닫고 status 2로 저장한다.
 
 ## 10/19 결정 사항
 
@@ -219,6 +232,8 @@ control ↔ instructor_console:
 | ↑ | `resolve` | `{"event_id":17}` | 강사 "완료" → 이벤트 종료, 다음 대상 |
 | ↑ | `dismiss` | `{"event_id":17}` | 강사 "오감지" → `close_reason=false_alarm`, 다음 대상 |
 | ↑ | `pan_tilt_jog` / `preset_save` | `{dpan, dtilt}` / `{seat}` | 시설 관리 팬틸트 각도 등록 |
+| ↑ | `clip_request` | `{"event_id":17}` | 이벤트 창 '녹화 영상 다시 보기' |
+| ↓ | `clip_info` | `{event_id, status: "none"\|"recording"\|"saved"\|"deleted", started_at, ended_at, path}` | `clip_request` 응답. Console은 같은 노트북이라 `service/jarvis_DB/` + `path`를 직접 연다 |
 
 화면은 `event_update` 최신 값으로 덮어쓰기만 한다. 화면에서 상태를 계산하지 않는다.
 
@@ -254,6 +269,15 @@ control ↔ student_client_N:
 | `track_offset` | 지금 active 좌석의 결과일 때만 `pan_tilt nudge`로 변환 |
 | 노드 offline | `device_update`. vision_service면 "감지 중단" 표시. 팬틸트(Uno) 통신 오류는 `pan_tilt_state` SAFE → "추적 중단 (알림은 계속)" |
 
+녹화 (`to="recorder"`, hub가 `db.start_clip`/`end_clip` + `ClipRecorder`로 실행):
+
+| 때 | 할 일 |
+| --- | --- |
+| 사건 `start`로 이벤트 생성 (확정) | `recorder start {event_id, seat, kind}` → event_clip 행(status 1, path `clips/{event_id}.mp4`), event_log `clip` |
+| `_close` (resolve·dismiss·expire·cleared) | `recorder stop {event_id}` → 파일을 닫으면 status 2, `keep_until = ended_at + clip_keep_days` |
+| 재시작 `start()` | 열린 이벤트마다 `recorder start` (새 파일 `clips/{event_id}_2.mp4`). 끊긴 녹화 행은 hub가 시작할 때 status 2로 닫음 |
+| 10분마다 (hub) | `keep_until`이 지난 녹화 파일 삭제 → status 3 |
+
 tick (0.1초마다, Control 시계):
 
 1. 쓰러짐 단계 알림: 미확인 15초 → 옆자리(`seat.neighbors`) `fall_alert neighbor`, 30초 → 전체 `fall_alert all`
@@ -278,7 +302,13 @@ timers:
 track:
   nudge_max_hz: 10
   nudge_gain: 8.0           # 측정 후 조정
+clips:                      # 이벤트 녹화 (Data Structure v2 4장)
+  dir: service/jarvis_DB/clips   # 저장소 최상위 기준
+  fps: 10
+  keep_days: 7              # 임시 (app_setting.clip_keep_days 가 있으면 우선)
 ```
+
+실행 옵션: `--no-clips` 녹화만 끄기, `--no-video` 영상 중계를 끄면 녹화도 꺼진다.
 
 ## DB (`service/jarvis_DB/create.sql`)
 

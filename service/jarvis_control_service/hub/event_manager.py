@@ -7,6 +7,9 @@
 - 시계는 항상 인자로 받는다(now = control 시계 rx_ts). 가짜 시계로 테스트할 수 있다.
 - [팬틸트] 팬틸트는 Control 내부 모듈(hub/pantilt)이다. to="pantilt" 인 Send 는
   hub 가 PanTiltService 메서드 호출로 바꿔 실행한다 (TCP 로 보내지 않음).
+- [녹화] 이벤트 녹화(event_clip)를 언제 시작·끝낼지도 여기서 정한다. to="recorder" 인 Send
+  (start {event_id, seat, kind} / stop {event_id}) 를 hub 가 ClipRecorder(hub/clip_recorder.py) 호출과
+  db.py 기록으로 바꾼다. 녹화 구간 = 이벤트 확정(detect) ~ 종료(resolve·dismiss·expire·clear).
 
 상태: active(추적 중) / waiting(대기열) / closed(종료) 세 가지뿐.
 confirm 은 상태가 아니다. confirmed_at 을 기록하고 단계 알림만 멈춘다.
@@ -26,6 +29,7 @@ SYSTEM = "system"
 PANTILT = "pantilt"                                  # [팬틸트] hub 가 PanTiltService 호출로 바꾸는 목적지
 KIND_CODE = {"fall": 1, "question": 2, "away": 3}    # [팬틸트] 팬틸트·LED 는 숫자 코드 (1 빨강·2 파랑·3 초록)
 PANTILT_SAFE = 7                                     # [팬틸트] pan_tilt_state.state 7 = SAFE (Uno 통신 오류)
+RECORDER = "recorder"                                # [녹화] hub 가 ClipRecorder 호출 + event_clip 기록으로 바꾸는 목적지
 
 # help_event 표에 저장하는 값 (문자열 그대로. 숫자 코드로 바꾸는 일은 db.py 가 한다)
 # reg_id·gen 은 db.py 가 채운다. source 는 DB 에 없다 (event_log detect 의 detail 에만).
@@ -123,7 +127,10 @@ class EventManager:
             self.next_id = max(self.next_id, ev.event_id + 1)
 
     def start(self, now: float) -> Effects:              # [팬틸트] 추가
-        """hub 가 시작 직후 한 번 호출. 복구된 active 사건 좌석으로 팬틸트·Vision 을 맞춘다."""
+        """hub 가 시작 직후 한 번 호출. 복구된 active 사건 좌석으로 팬틸트·Vision 을 맞춘다.
+        [녹화] 재시작 전에 열려 있던 이벤트는 녹화를 새로 시작한다 (끊긴 녹화는 hub 가 DB 에서 닫는다)."""
+        for ev in self._sorted_open():                                  # [녹화]
+            self._record_start(ev)                                      # [녹화]
         self._reschedule(now)
         return self._flush()
 
@@ -148,6 +155,7 @@ class EventManager:
             self.events[ev.event_id] = ev
             self._save(ev)
             self._log(ev, now, "detect", SYSTEM, {"source": source})
+            self._record_start(ev)                  # [녹화] 확정 시각부터 cam2 녹화
             self._reschedule(now)                   # active 가 되면 거기서 event_update 를 보냄
             if ev.status == "waiting":
                 self._log(ev, now, "wait", SYSTEM)
@@ -401,6 +409,7 @@ class EventManager:
         self._save(ev)
         self._log(ev, now, action, actor)
         self._update(ev)
+        self._send(RECORDER, "stop", {"event_id": ev.event_id})        # [녹화] 완료·오감지·만료·복귀 = 녹화 끝
 
     def _fall_alert(self, ev: HelpEvent, now: float, stage: str):
         ev.alert_stage = stage
@@ -417,6 +426,9 @@ class EventManager:
         if ev.alert_stage == "all":
             return list(STUDENT_NODES)
         return []
+
+    def _record_start(self, ev: HelpEvent):                            # [녹화]
+        self._send(RECORDER, "start", {"event_id": ev.event_id, "seat": ev.seat, "kind": ev.kind})
 
     def _cancel_fall_alert(self, ev: HelpEvent):
         self._send_students(self._alert_targets(ev), "fall_alert_cancel", {"target_seat": ev.seat})

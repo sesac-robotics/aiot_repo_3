@@ -183,8 +183,8 @@ class EventPanel(QWidget):
         self.video_stack = QStackedWidget()
         self.live = LiveVideo(cam2, title="팬틸트 카메라 실시간")
         self.clip = ClipPlayer(clip_root)
-        # Control 에 녹화 요청 메시지가 아직 없다 → 바로 '녹화 없음'으로 답한다
-        self.clip.request_clip.connect(lambda eid: self.clip.on_clip_info({"event_id": eid, "status": "none"}))
+        # 녹화 다시 보기: Control 에 clip_request → clip_info 가 오면 main_window 가 on_clip_info 로 넘긴다
+        self.clip.request_clip.connect(self._request_clip)
         self.video_stack.addWidget(self.live)
         self.video_stack.addWidget(self.clip)
         self.video_mode = QLabel(objectName="muted")
@@ -219,6 +219,10 @@ class EventPanel(QWidget):
         for b in (self.b_confirm, self.b_resolve, self.b_dismiss):
             b.setMinimumWidth(90); btns.addWidget(b)
         lay.addLayout(btns)
+
+    def _request_clip(self, event_id: int):
+        if not self.send("clip_request", {"event_id": event_id}):
+            self.clip.on_clip_info({"event_id": event_id, "status": "offline"})
 
     def _dismiss(self):
         """오감지는 이벤트를 닫고 단계 알림도 멈추므로 한 번 더 묻는다 (완료 버튼 옆이라 잘못 누르기 쉬움)"""

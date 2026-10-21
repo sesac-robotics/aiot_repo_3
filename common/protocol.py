@@ -93,7 +93,9 @@ CONSOLE_TYPES = {"event_update", "queue_state", "device_update",
                  "seat_info",                            # ↓ 좌석 한 개 {seat, label, neighbors, has_preset, student_name, registered_at}
                  "confirm", "resolve",                   # ↑
                  "dismiss",                              # ↑ 강사 "오감지" {event_id} -> close_reason false_alarm
-                 "pan_tilt_jog", "preset_save"}          # ↑ [팬틸트] 프리셋 등록 화살표 {dpan, dtilt} / 등록 버튼 {seat}
+                 "pan_tilt_jog", "preset_save",          # ↑ [팬틸트] 프리셋 등록 화살표 {dpan, dtilt} / 등록 버튼 {seat}
+                 "clip_request",                         # ↑ [녹화] 이벤트 창 다시 보기 {event_id}
+                 "clip_info"}                            # ↓ [녹화] {event_id, status: none|recording|saved|deleted, started_at, ended_at, path}
 # control <-> student_client_N
 STUDENT_TYPES = {"fall_alert", "fall_alert_cancel",      # ↓
                  "fall_confirm", "condition_summary",    # ↑
@@ -146,6 +148,7 @@ TYPE_CODES = {
     "event_update": 0x40, "queue_state": 0x41, "device_update": 0x42, "class_condition": 0x43,
     "snapshot": 0x44, "confirm": 0x45, "resolve": 0x46,
     "pan_tilt_jog": 0x47, "preset_save": 0x48, "preset_saved": 0x49, "seat_info": 0x4A, "dismiss": 0x4B,
+    "clip_request": 0x4C, "clip_info": 0x4D,
     # student 0x5_
     "fall_alert": 0x50, "fall_alert_cancel": 0x51, "fall_confirm": 0x52, "condition_summary": 0x53,
     "seat_register": 0x54,

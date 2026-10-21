@@ -366,6 +366,21 @@ class Database:
                 (ts, CLIP_SAVED, ts + keep_days * DAY_S, CLIP_RECORDING))
         return cur.rowcount
 
+    def discard_clip(self, clip_id: int, ts: float):
+        """프레임을 한 장도 못 쓴 녹화 (cam2 영상 없음). 파일은 없고 삭제됨(3)으로 남긴다."""
+        with self.conn:
+            self.conn.execute("UPDATE event_clip SET ended_at=?, status=? WHERE clip_id=?",
+                              (ts, CLIP_DELETED, clip_id))
+
+    def latest_clip(self, event_id: int) -> dict | None:
+        """이벤트 창 다시 보기 (clip_request): 녹화 중인 것 > 마지막 저장본 > 마지막 행 순서."""
+        rows = self.clips_for_event(event_id)
+        for st in (CLIP_RECORDING, CLIP_SAVED):
+            hit = [r for r in rows if r["status"] == st]
+            if hit:
+                return hit[-1]
+        return rows[-1] if rows else None
+
     def expired_clips(self, now: float) -> list[dict]:
         """보관 기간이 지난 클립 (파일 삭제 대상)."""
         rows = self.conn.execute(
