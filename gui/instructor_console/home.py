@@ -12,7 +12,7 @@ from typing import Callable
 from PyQt6.QtCore import QDate, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFrame, QGridLayout,
-                             QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
+                             QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QMessageBox,
                              QPushButton, QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
                              QWidget)
 
@@ -209,14 +209,29 @@ class EventPanel(QWidget):
         btns = QHBoxLayout()
         self.b_confirm = QPushButton("확인", objectName="primary")
         self.b_resolve = QPushButton("완료")
+        self.b_dismiss = QPushButton("오감지")
         self.b_confirm.setToolTip("쓰러짐은 단계 알림을 멈추고, 질문은 '응답 중'으로 바뀝니다")
+        self.b_dismiss.setToolTip("잘못 감지된 이벤트로 닫습니다")
         self.b_confirm.clicked.connect(lambda: self.send("confirm", {"event_id": self.event_id}))
         self.b_resolve.clicked.connect(lambda: self.send("resolve", {"event_id": self.event_id}))
-        # '오감지' 버튼은 Control 에 해당 메시지(dismiss)가 생기면 다시 넣는다
+        self.b_dismiss.clicked.connect(self._dismiss)
         btns.addStretch(1)
-        for b in (self.b_confirm, self.b_resolve):
+        for b in (self.b_confirm, self.b_resolve, self.b_dismiss):
             b.setMinimumWidth(90); btns.addWidget(b)
         lay.addLayout(btns)
+
+    def _dismiss(self):
+        """오감지는 이벤트를 닫고 단계 알림도 멈추므로 한 번 더 묻는다 (완료 버튼 옆이라 잘못 누르기 쉬움)"""
+        ev = self._data()
+        if not ev:
+            return
+        warn = "\n\n⚠ 쓰러짐입니다. 학생 상태를 직접 확인했나요?" if ev["kind"] == "fall" else ""
+        ans = QMessageBox.question(
+            self, "오감지로 닫기",
+            f"{ev['seat']}번 좌석 {T.KIND_NAME[ev['kind']]} 이벤트를 잘못 감지된 것으로 닫습니다.{warn}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if ans == QMessageBox.StandardButton.Yes:
+            self.send("dismiss", {"event_id": self.event_id})
 
     def open(self, event_id: int):
         self.event_id = event_id
@@ -267,6 +282,7 @@ class EventPanel(QWidget):
 
         self.b_confirm.setEnabled(is_open and not ev["confirmed_at"])
         self.b_resolve.setEnabled(is_open)
+        self.b_dismiss.setEnabled(is_open)
 
 
 # ── 3. 학생 정보 창 ─────────────────────────────────────────
@@ -365,8 +381,7 @@ class StudentPanel(QWidget):
         ev = self.store.seat_top_event(self.seat)
         self.fields["state"].setText(T.KIND_NAME[ev["kind"]] if ev else "일반")
         self.fields["state"].setStyleSheet(f"font-weight:600; color:{T.KIND_COLOR[ev['kind']] if ev else '#202124'};")
-        # 자리 등록 정보는 아직 Control 이 보내지 않는다
-        self.fields["reg"].setText("등록됨" if name else "—")
+        self.fields["reg"].setText(f"{T.mdhm(s['registered_at'])} 등록" if s.get("registered_at") else "—")
         nbs = s["neighbors"]
         self.fields["nb"].setText(", ".join(f"{n}번 {self.store.student_name(n) or '(미등록)'}" for n in nbs) or "—")
 

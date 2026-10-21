@@ -71,6 +71,19 @@ class EventManagerTest(unittest.TestCase):
         self.start("question", 2, 1)
         self.assertEqual(self.queue(), {"active": 2, "waiting": [1]})
 
+    def test_dismiss_closes_as_false_alarm_and_cancels_alert(self):
+        self.start("fall", 2, 0)
+        self.start("question", 3, 1)
+        self.m.tick(T0 + 16)                                                 # 옆자리 알림까지 간 쓰러짐
+        fx = self.m.on_dismiss(1, T0 + 17, "instructor_console")
+        closed = [s for s in fx.saves if s["event_id"] == 1][-1]
+        self.assertEqual((closed["status"], closed["close_reason"]), ("closed", "false_alarm"))
+        self.assertIn("dismiss", [l[2] for l in fx.logs])
+        self.assertEqual(sorted(c.to for c in sends(fx, "fall_alert_cancel")),
+                         ["student_client_1", "student_client_4"])
+        self.assertEqual(self.queue(), {"active": 2, "waiting": []})         # 다음 대상으로
+        self.assertFalse(self.m.on_dismiss(1, T0 + 18, "instructor_console"))   # 이미 닫힘
+
     def test_resolve_moves_to_next(self):
         self.start("question", 2, 0)
         self.start("fall", 3, 1)
@@ -111,7 +124,7 @@ class EventManagerTest(unittest.TestCase):
         self.assertFalse(sends(self.m.tick(T0 + 14.9), "fall_alert"))
         fx = self.m.tick(T0 + 15.0)
         alerts = sends(fx, "fall_alert")
-        self.assertEqual(sorted(a.to for a in alerts), ["student_client_1", "student_client_3"])
+        self.assertEqual(sorted(a.to for a in alerts), ["student_client_1", "student_client_4"])   # 2×2
         self.assertEqual(alerts[0].value, {"target_seat": 2, "stage": "neighbor"})
         self.assertFalse(sends(self.m.tick(T0 + 20), "fall_alert"))        # 한 번만
         fx = self.m.tick(T0 + 30.0)
@@ -123,7 +136,7 @@ class EventManagerTest(unittest.TestCase):
         self.m.tick(T0 + 15)
         fx = self.m.on_confirm(1, T0 + 16, "instructor_console")
         self.assertEqual(sorted(c.to for c in sends(fx, "fall_alert_cancel")),
-                         ["student_client_1", "student_client_3"])           # 알림 받은 옆자리만
+                         ["student_client_1", "student_client_4"])           # 알림 받은 옆자리만
         self.assertEqual(self.m.events[1].confirmed_by, "instructor_console")
         self.assertEqual(self.m.events[1].status, "active")             # confirm 은 상태가 아님
         self.assertFalse(sends(self.m.tick(T0 + 40), "fall_alert"))

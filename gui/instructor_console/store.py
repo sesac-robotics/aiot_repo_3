@@ -4,7 +4,9 @@
 상태를 직접 계산하지 않는다. 여기서 하는 건 '표시를 위한 정렬·필터'뿐이다.
 
 Control(hub)이 Console 에 보내는 것 (common/protocol.py CONSOLE_TYPES):
-  snapshot {events, queue, devices} · event_update · queue_state · device_update · class_condition · preset_saved
+  snapshot {events, queue, devices, seats} · event_update · queue_state · device_update · class_condition
+  · preset_saved · seat_info (자리 등록 / 좌석 정보)
+옆자리는 Control 의 control.yaml 이 기준이다 (화면에 따로 적어 두지 않는다).
 """
 from __future__ import annotations
 
@@ -13,8 +15,6 @@ from PyQt6.QtCore import QObject, QSettings, pyqtSignal
 from common import protocol as P
 
 SEATS = P.VALID_SEATS
-# 2×2 배치 (1 2 / 3 4), 옆자리 = 가로·세로만 (control.yaml 과 같게)
-LAYOUT_NEIGHBORS = {1: (2, 3), 2: (1, 4), 3: (1, 4), 4: (2, 3)}
 
 
 def settings() -> QSettings:
@@ -42,9 +42,16 @@ class Store(QObject):
 
     @staticmethod
     def _empty_seat(s):
-        # 학생 이름(자리 등록)은 아직 Control 이 보내지 않는다 → 미등록으로 표시
-        return {"seat": s, "neighbors": list(LAYOUT_NEIGHBORS[s]), "has_preset": False,
-                "preset": None, "device": P.student_node(s), "student_name": ""}
+        # Control 에 접속해 snapshot·seat_info 를 받기 전 (옆자리·이름을 모름)
+        return {"seat": s, "label": f"{s}번 좌석", "neighbors": [], "has_preset": False,
+                "preset": None, "device": P.student_node(s), "student_name": "", "registered_at": None}
+
+    def _set_seat(self, row: dict):
+        """seat_info 한 개를 반영. 이 화면에서만 아는 값(preset 각도)은 유지한다."""
+        seat = self.seats.get(row.get("seat"))
+        if seat is not None:
+            seat.update({k: row[k] for k in ("label", "neighbors", "has_preset", "student_name",
+                                             "registered_at") if k in row})
 
     # ── 수신 처리 ───────────────────────────────────
     def apply(self, name: str, m: dict):
@@ -56,6 +63,8 @@ class Store(QObject):
                 self.events[e["event_id"]] = e
             self.queue = m.get("queue") or {"active": None, "waiting": []}
             self.devices = {d["node"]: d for d in m.get("devices", [])}
+            for row in m.get("seats", []):
+                self._set_seat(row)
             self.in_snapshot = False
             self.snapshot_done.emit()
             self.seats_changed.emit(); self.queue_changed.emit(); self.devices_changed.emit()
@@ -72,6 +81,9 @@ class Store(QObject):
         elif name == "class_condition":
             self.condition = m
             self.condition_changed.emit()
+        elif name == "seat_info":                # 학생 [자리 등록] 등 좌석 정보가 바뀜
+            self._set_seat(m)
+            self.seats_changed.emit()
         elif name == "preset_saved":             # 팬틸트 각도 등록 완료 {seat, pan, tilt}
             seat = self.seats.get(m.get("seat"))
             if seat:

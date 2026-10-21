@@ -19,7 +19,7 @@ KIND_NAME = {"fall": "쓰러짐", "question": "질문", "away": "자리비움", 
 OFFLINE_ORANGE = "#fbe3cf"
 
 STATUS_NAME = {"active": "대응 중", "waiting": "대기", "closed": "종료"}
-CLOSE_NAME = {None: "", "resolved": "완료", "expired": "만료", "cleared": "해제"}
+CLOSE_NAME = {None: "", "resolved": "완료", "false_alarm": "오감지", "expired": "만료", "cleared": "해제"}
 STAGE_NAME = {"none": "알림 전", "neighbor": "옆자리 알림", "all": "반 전체 알림"}
 EXPLAIN_NAME = {None: "", "gemini": "Gemini", "ollama": "Ollama", "default": "기본 문구"}
 

@@ -23,10 +23,10 @@ CREATE_SQL = SERVICE_DIR.parent / "jarvis_DB" / "create.sql"
 # control.yaml 이 없을 때 쓰는 값 (테스트도 이 값을 쓴다)
 CONTROL_DEFAULTS = {
     "seats": {
-        1: {"pan": 60, "tilt": 85, "neighbors": [2]},
-        2: {"pan": 80, "tilt": 85, "neighbors": [1, 3]},
-        3: {"pan": 100, "tilt": 85, "neighbors": [2, 4]},
-        4: {"pan": 120, "tilt": 85, "neighbors": [3]},
+        1: {"pan": 60, "tilt": 85, "neighbors": [2, 3]},       # 2×2 (1 2 / 3 4), 가로·세로 옆자리
+        2: {"pan": 80, "tilt": 85, "neighbors": [1, 4]},
+        3: {"pan": 100, "tilt": 85, "neighbors": [1, 4]},
+        4: {"pan": 120, "tilt": 85, "neighbors": [2, 3]},
     },
     "priority": {"fall": 1, "question": 2, "away": 3},
     "timers": {

@@ -194,13 +194,20 @@ class EventManager:
 
     def on_resolve(self, event_id: int, now: float, by: str) -> Effects:
         """강사 화면의 "완료". 이벤트 종료 후 다음 대상."""
+        return self._end_by_instructor(event_id, now, by, "resolved", "resolve")
+
+    def on_dismiss(self, event_id: int, now: float, by: str) -> Effects:
+        """강사 화면의 "오감지". 잘못 감지된 이벤트로 닫는다 (close_reason false_alarm). 나머지는 완료와 같다."""
+        return self._end_by_instructor(event_id, now, by, "false_alarm", "dismiss")
+
+    def _end_by_instructor(self, event_id: int, now: float, by: str, reason: str, action: str) -> Effects:
         ev = self.events.get(event_id)
         if ev is None:
-            log.warning("resolve: 열린 이벤트 %s 없음", event_id)
+            log.warning("%s: 열린 이벤트 %s 없음", action, event_id)
             return self._flush()
         if ev.kind == "fall" and ev.alert_stage != "none" and ev.confirmed_at is None:
-            self._cancel_fall_alert(ev)
-        self._close(ev, now, "resolved", "resolve", by)
+            self._cancel_fall_alert(ev)          # 알림 받은 학생 화면의 알림을 내린다
+        self._close(ev, now, reason, action, by)
         self._reschedule(now)
         return self._flush()
 

@@ -90,11 +90,14 @@ CAMERA_TYPES = {"pan_tilt",                              # ↓
 CONSOLE_TYPES = {"event_update", "queue_state", "device_update",
                  "class_condition", "snapshot",          # ↓
                  "preset_saved",                         # ↓ [팬틸트] {seat, pan, tilt}
+                 "seat_info",                            # ↓ 좌석 한 개 {seat, label, neighbors, has_preset, student_name, registered_at}
                  "confirm", "resolve",                   # ↑
+                 "dismiss",                              # ↑ 강사 "오감지" {event_id} -> close_reason false_alarm
                  "pan_tilt_jog", "preset_save"}          # ↑ [팬틸트] 프리셋 등록 화살표 {dpan, dtilt} / 등록 버튼 {seat}
 # control <-> student_client_N
 STUDENT_TYPES = {"fall_alert", "fall_alert_cancel",      # ↓
-                 "fall_confirm", "condition_summary"}    # ↑
+                 "fall_confirm", "condition_summary",    # ↑
+                 "seat_register"}                        # ↑ [자리 등록] {student_name, baseline, zones}
 # 공통
 COMMON_TYPES = {"heartbeat", "node_info", "rx_ack"}
 
@@ -111,7 +114,10 @@ NOT_LOGGED_TYPES = {"heartbeat", "track_offset", "track_obs"}
 
 # 끊긴 동안 NodeClient 가 모아 두었다가 재접속 후 보내는 종류
 # (사건 + 사람이 누른 버튼. 상태 메시지는 곧 새 값이 오므로 버린다)
-BUFFERED_TYPES = INCIDENT_TYPES | {"confirm", "resolve", "fall_confirm", "preset_save"}
+BUFFERED_TYPES = INCIDENT_TYPES | {"confirm", "resolve", "dismiss", "fall_confirm", "preset_save",
+                                   "seat_register"}
+
+MAX_NAME_LEN = 50                            # seat_register 학생 이름 최대 글자 수
 
 # 하트비트 (5.5)
 HEARTBEAT_INTERVAL_S = 2.0
@@ -139,9 +145,10 @@ TYPE_CODES = {
     # console 0x4_
     "event_update": 0x40, "queue_state": 0x41, "device_update": 0x42, "class_condition": 0x43,
     "snapshot": 0x44, "confirm": 0x45, "resolve": 0x46,
-    "pan_tilt_jog": 0x47, "preset_save": 0x48, "preset_saved": 0x49,
+    "pan_tilt_jog": 0x47, "preset_save": 0x48, "preset_saved": 0x49, "seat_info": 0x4A, "dismiss": 0x4B,
     # student 0x5_
     "fall_alert": 0x50, "fall_alert_cancel": 0x51, "fall_confirm": 0x52, "condition_summary": 0x53,
+    "seat_register": 0x54,
 }
 CODE_NODES = {v: k for k, v in NODE_CODES.items()}
 CODE_TYPES = {v: k for k, v in TYPE_CODES.items()}
@@ -414,7 +421,7 @@ def _check_value(type_: str, v: dict):
         if not cond:
             raise MessageError(f"{type_} 의 value 오류 ({what}): {v}")
 
-    if type_ in ("confirm", "resolve"):
+    if type_ in ("confirm", "resolve", "dismiss"):
         need(_is_int(v.get("event_id")), "event_id 는 정수")
     elif type_ == "explain_text":
         need(_is_int(v.get("event_id")), "event_id 는 정수")
@@ -434,6 +441,11 @@ def _check_value(type_: str, v: dict):
         need(_is_num(v.get("dpan")) and _is_num(v.get("dtilt")), "dpan, dtilt 는 숫자")
     elif type_ == "preset_save":
         need(v.get("seat") in VALID_SEATS and _is_int(v.get("seat")), "seat 은 좌석 번호")
+    elif type_ == "seat_register":
+        name = v.get("student_name")
+        need(isinstance(name, str) and 0 < len(name.strip()) <= MAX_NAME_LEN, f"student_name 은 1~{MAX_NAME_LEN}자")
+        need(isinstance(v.get("baseline"), dict), "baseline 은 dict")
+        need(v.get("zones") is None or isinstance(v["zones"], dict), "zones 는 dict")
     elif type_ == "condition_summary":
         # 필드 이름이 틀리면 반 집계에서 조용히 '정상'으로 세어지므로 받는 순간 버린다
         need(all(isinstance(v.get(k), bool) for k in ("focus_low", "posture_bad")),

@@ -36,7 +36,7 @@ aiot_repo_3/
 │   └─ run_hub.py, run_client.py
 ├─ service/jarvis_DB/create.sql               DB 스키마 원본 (db.py 가 시작할 때 실행)
 ├─ service/jarvis_vision_service/run_assistant.py   vision_service 노드
-├─ hw/camera_controller/run_controller.py     camera_controller 노드 (Serial → Arduino)
+├─ hw/camera_controller/camera_controller.ino Uno 펌웨어 (팬틸트는 Control 안의 hub/pantilt 가 USB 시리얼로 직접 움직임)
 └─ hw/camera_streamer/                        UDP 영상 송출 → Control (TCP 노드 아님)
     ├─ run_fixed_camera.py                    고정 카메라(내장 웹캠, cam1)
     ├─ run_pantilt_camera.py                  팬틸트 카메라(USB, cam2)
@@ -91,7 +91,7 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 - `track_offset`은 메시지의 `seat`이 지금 active 좌석과 같아야 처리한다. Vision은 `seat`을 꼭 채운다.
 - nudge 각도 = `dx·nudge_gain`, `dy·nudge_gain`. 방향이 반대면 `nudge_gain`을 음수로 한다.
 - `class_condition`은 최근 30초 안에 보고한 학생만으로 비율을 내고, `reporting`(보고한 수)도 같이 보낸다.
-- 다시 접속한 `vision_service`·`camera_controller`에는 지금 추적 대상(`track_target`, `pan_tilt preset/home`)을 다시 보낸다.
+- 다시 접속한 `vision_service`에는 지금 추적 대상(`track_target`)을 다시 보낸다.
 - `NodeClient`는 끊긴 동안 사건 외에 `confirm`·`resolve`·`fall_confirm`도 모아 두었다가 보낸다.
 
 ## 10/19 결정 사항
@@ -128,7 +128,7 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 
 그림과 아직 다른 점:
 
-- DEV-03 그림은 Control → Serial → Camera Controller. 코드는 Control → `camera_controller` 노드(TCP) → Serial → Arduino. 시리얼 포트는 그 노드만 잡는다 (같은 PC에서 돌아도 됨).
+- DEV-03 Control → USB Serial → Arduino Uno. 팬틸트는 TCP 노드가 아니라 Control 프로세스 안의 `hub/pantilt`(PanTiltService)다. 시리얼 포트는 Control만 잡는다. (예전 `camera_controller` TCP 노드·`run_controller.py`는 없앰)
 
 ## 이름 규칙 (소문자_밑줄)
 
@@ -138,7 +138,7 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 | --- | --- | --- |
 | `control` | run_hub.py | hub가 보내는 메시지의 node 값 |
 | `vision_service` | run_assistant.py | 기존 fixedcam/tracker 대체 |
-| `camera_controller` | run_controller.py | 신규 |
+| `camera_controller` | (없음) | 예전 팬틸트 TCP 노드. 지금은 Control 안의 `hub/pantilt` (노드 코드 2는 DB 장비 '팬틸트(가상)'로 남김) |
 | `instructor_console` | run_console.py | 신규, 메인 대시보드 |
 | `student_client_1` ~ `student_client_4` | run_client.py | 기존 student1~4 |
 
@@ -200,14 +200,9 @@ vision_service ↔ control:
 | ↓ | `track_target` | `{"seat":2}` 또는 `{"seat":null}` | 추적 대상 변경 시 |
 | ↓ | `explain_request` | `{"event_id","kind","seat","elapsed_s","waiting_count"}` | 새 이벤트 발생 시 (비동기) |
 
-control ↔ camera_controller:
-
-| 방향 | type | value | 때 |
-| --- | --- | --- | --- |
-| ↓ | `pan_tilt` | `{"mode":"preset","seat":2,"pan":80,"tilt":85}` | 추적 대상 변경 시. 각도는 control이 control.yaml에서 읽어 싣는다 |
-| ↓ | `pan_tilt` | `{"mode":"nudge","dpan":1.5,"dtilt":-0.8}` | `track_offset` 수신 시 (최대 10Hz) |
-| ↓ | `pan_tilt` | `{"mode":"home"}` | 대상 없을 때 |
-| ↑ | `pan_tilt_state` | `{"pan":95,"tilt":80,"ok":true}` | 명령 적용 후 (Serial `OK` 전달) |
+팬틸트: TCP 메시지가 아니다. `event_manager`의 `to="pantilt"` 할 일을 hub가 `PanTiltService` 메서드(preset·home·track·jog·save)로 부르고,
+팬틸트 알림(`pan_tilt_state`, `preset_saved`)은 이벤트 루프로 넘겨 받는다 (`hub/pantilt/README.md`).
+`protocol.py`의 `pan_tilt`·`pan_tilt_state`는 예전 노드용으로 남아 있을 뿐 쓰지 않는다.
 
 control ↔ instructor_console:
 
@@ -217,9 +212,13 @@ control ↔ instructor_console:
 | ↓ | `queue_state` | `{"active":17,"waiting":[18,15]}` | 대기열 변경 시 |
 | ↓ | `device_update` | `{"node","online","note"}` | 장비 상태 변경 시 |
 | ↓ | `class_condition` | `{"focus_low_ratio","posture_bad_ratio"}` | 10초마다 (반 평균만) |
-| ↓ | `snapshot` | 열린 이벤트 전체 + 장비 상태 | Console 접속/재접속 시 |
+| ↓ | `snapshot` | `{events, queue, devices, seats}` 열린 이벤트 + 장비 상태 + 좌석(옆자리·학생 이름) | Console 접속/재접속 시 |
+| ↓ | `seat_info` | `{seat, label, neighbors, has_preset, student_name, registered_at}` | 학생 [자리 등록] 시 |
+| ↓ | `preset_saved` | `{seat, pan, tilt}` | 팬틸트 각도 저장 후 |
 | ↑ | `confirm` | `{"event_id":17}` | 강사 "확인" → 단계 알림 멈춤 |
 | ↑ | `resolve` | `{"event_id":17}` | 강사 "완료" → 이벤트 종료, 다음 대상 |
+| ↑ | `dismiss` | `{"event_id":17}` | 강사 "오감지" → `close_reason=false_alarm`, 다음 대상 |
+| ↑ | `pan_tilt_jog` / `preset_save` | `{dpan, dtilt}` / `{seat}` | 시설 관리 팬틸트 각도 등록 |
 
 화면은 `event_update` 최신 값으로 덮어쓰기만 한다. 화면에서 상태를 계산하지 않는다.
 
@@ -231,6 +230,7 @@ control ↔ student_client_N:
 | ↓ | `fall_alert_cancel` | `{"target_seat":3}` | 누군가 확인했을 때 |
 | ↑ | `fall_confirm` | `{"target_seat":3}` | 학생 확인 버튼 |
 | ↑ | `condition_summary` | `{"focus_low":false,"posture_bad":true}` | 10초마다 |
+| ↑ | `seat_register` | `{"student_name","baseline","zones"}` | 학생 [자리 등록]. hub가 `db.register_seat` → 강사 화면에 `seat_info` |
 
 공통: `heartbeat`(2초마다, 6초 없으면 offline, 기록 안 함), `node_info`(접속 시 한 번), `rx_ack`(사건 수신 확인 — 강사 confirm과 다름).
 
@@ -250,8 +250,9 @@ control ↔ student_client_N:
 | `fall` `end` | 자동으로 닫지 않는다. 강사 화면에 "일어남"만 표시 |
 | `confirm` / `fall_confirm` | `confirmed_at`, `confirmed_by` 기록. 쓰러짐이면 `fall_alert_cancel` |
 | `resolve` | `closed`, `close_reason=resolved` → `reschedule()` |
+| `dismiss` | `closed`, `close_reason=false_alarm` → `reschedule()` (그 외는 `resolve`와 같음) |
 | `track_offset` | 지금 active 좌석의 결과일 때만 `pan_tilt nudge`로 변환 |
-| 노드 offline | `device_update`. vision_service면 "감지 중단" 표시, camera_controller면 추적만 멈추고 알림은 계속 |
+| 노드 offline | `device_update`. vision_service면 "감지 중단" 표시. 팬틸트(Uno) 통신 오류는 `pan_tilt_state` SAFE → "추적 중단 (알림은 계속)" |
 
 tick (0.1초마다, Control 시계):
 
@@ -264,10 +265,10 @@ tick (0.1초마다, Control 시계):
 
 ```yaml
 seats:
-  1: {pan: 60,  tilt: 85, neighbors: [2]}
-  2: {pan: 80,  tilt: 85, neighbors: [1, 3]}
-  3: {pan: 100, tilt: 85, neighbors: [2, 4]}
-  4: {pan: 120, tilt: 85, neighbors: [3]}
+  1: {pan: 60,  tilt: 85, neighbors: [2, 3]}   # 2×2 (1 2 / 3 4), 가로·세로 옆자리
+  2: {pan: 80,  tilt: 85, neighbors: [1, 4]}
+  3: {pan: 100, tilt: 85, neighbors: [1, 4]}
+  4: {pan: 120, tilt: 85, neighbors: [2, 3]}
 priority: {fall: 1, question: 2, away: 3}
 timers:
   fall_neighbor_s: 15

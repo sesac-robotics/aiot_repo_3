@@ -50,7 +50,7 @@ STUDENT_REPORT_INTERVAL_S = 60.0             # 좌석별 수신 현황 한 줄 �
 STUDENT_SEND_TYPES = {"fall_alert", "fall_alert_cancel"}
 
 TICK_INTERVAL_S = 0.1
-QUIET_SEND_TYPES = {"track_target", "explain_request"}   # 미접속이어도 경고 안 함 ([팬틸트] pan_tilt 는 TCP 로 안 보냄)
+QUIET_SEND_TYPES = {"track_target", "explain_request", "seat_info"}   # 미접속이어도 경고 안 함 (seat_info 는 접속 시 snapshot 으로 다시 감) ([팬틸트] pan_tilt 는 TCP 로 안 보냄)
 
 
 @dataclass
@@ -267,7 +267,33 @@ class HubServer:
             self._report_counts[node] = 0
         await self.apply(self.events.on_node_online(node, True, now))
         if node == CONSOLE_NODE:
-            await self.send(CONSOLE_NODE, "snapshot", self.events.snapshot())
+            snap = self.events.snapshot()
+            snap["seats"] = self.seat_rows()         # 좌석도: 옆자리(control.yaml) + 지금 앉은 학생 이름 (DB)
+            await self.send(CONSOLE_NODE, "snapshot", snap)
+
+    def seat_rows(self, seat: int | None = None) -> list[dict]:
+        """강사 화면에 보내는 좌석 정보 (DB seat 표 그대로, 판단 없음). 옆자리는 control.yaml 이 기준."""
+        rows = []
+        for r in self.db.seat_info():
+            if seat is not None and r["seat"] != seat:
+                continue
+            rows.append({"seat": r["seat"], "label": r["label"] or f"{r['seat']}번 좌석",
+                         "neighbors": [int(n) for n in (r["neighbors"] or "").split(",") if n.strip()],
+                         "has_preset": bool(r["has_preset"]),
+                         "student_name": r["student_name"] or "", "registered_at": r["registered_at"]})
+        return rows
+
+    async def on_seat_register(self, conn: NodeConn, v: dict, rx_ts: float):
+        """학생 화면 [자리 등록] -> DB seat_registration -> 강사 화면에 seat_info."""
+        seat = student_seat(conn.name)
+        if seat is None:
+            log.warning("%s 는 학생 노드가 아니라 seat_register 를 버림", conn.name)
+            return
+        reg_id = self.db.register_seat(seat, v["student_name"].strip(), v["baseline"], v.get("zones"), rx_ts)
+        slog.info("수신 OK %s seat_register seat=%d reg_id=%d (zones %s)",
+                  conn.name, seat, reg_id, "있음" if v.get("zones") else "없음")
+        for row in self.seat_rows(seat):
+            await self.send(CONSOLE_NODE, "seat_info", row, seat)
 
     async def set_offline(self, conn: NodeConn, reason: str):
         conn.online = False
@@ -313,6 +339,11 @@ class HubServer:
         elif t == "resolve":
             if "event_id" in v:
                 await self.apply(self.events.on_resolve(v["event_id"], rx_ts, conn.name))
+        elif t == "dismiss":                                            # 강사 "오감지"
+            if "event_id" in v:
+                await self.apply(self.events.on_dismiss(v["event_id"], rx_ts, conn.name))
+        elif t == "seat_register":                                      # 학생 [자리 등록]
+            await self.on_seat_register(conn, v, rx_ts)
         elif t == "fall_confirm":
             if conn.name in STUDENT_NODES:
                 slog.info("수신 OK %s fall_confirm target_seat=%s seq=%d", conn.name, v.get("target_seat"), msg["seq"])
