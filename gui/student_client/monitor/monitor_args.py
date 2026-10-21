@@ -30,6 +30,10 @@ def build_parser():
     ap.add_argument("--face-rule", action="store_true", help="학습 모델 없이 MediaPipe 규칙으로 얼굴 판정 (비교용)")
     ap.add_argument("--face-img-every", type=int, default=3,
                     help="얼굴 이미지 판정을 N프레임마다 갱신 (수집 때 3프레임마다 저장한 것과 같게)")
+    ap.add_argument("--face-models", default=str(ROOT / "models" / "face" / "v1"),
+                    help="얼굴 모델 폴더 (이미지 모델 2개; 시간 흐름 모델이 없으면 models/face/v1 것을 사용)")
+    ap.add_argument("--no-face-evidence", action="store_true",
+                    help="눈 감김·입 벌림으로 졸음·하품을 확인하는 보정을 끔 (비교용)")
     ap.add_argument("--seat", type=int, default=1, help="좌석 번호 (기준값 저장 단위)")
     ap.add_argument("--register", action="store_true",
                     help="저장값이 있어도 바른 자세·방향을 새로 등록 (이후 학생 화면의 등록 버튼)")
