@@ -1,7 +1,7 @@
 """
 control(hub) TCP 서버 (상세 설계 0·5·6장)
 
-- 노드 <-> control: TCP 위의 줄 단위 JSON (common/protocol.py), 포트 5000
+- 노드 <-> control: TCP 위의 바이너리 프레임 v3 (common/protocol.py: encode / FrameReader / parse_message), 포트 5000
 - 원본 메시지는 DB 에 기록하지 않는다 (Data Structure v2: messages·nodes·node_status 폐지)
 - heartbeat -> device.last_seen (학생: rtt_ms·cam_ok, vision: cam1/cam2 -> 장비 21·22)
 - device_update -> device + device_log, class_condition -> class_condition 표
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 from common.config import load_config
 from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
-                             INCIDENT_TYPES, NOT_LOGGED_TYPES, MessageError, encode,
+                             INCIDENT_TYPES, NOT_LOGGED_TYPES, FrameReader, MessageError, encode,
                              make_message, parse_message, student_seat)
 from hub.control_config import DB_PATH, ConfigError, load_control_config
 from hub.db import Database, SchemaMismatch
@@ -81,7 +81,12 @@ class HubServer:
         self.seq += 1
         msg = make_message(CONTROL_NODE, self.seq, type_, seat, value)
         try:
-            conn.writer.write(encode(msg))
+            data = encode(msg)
+        except MessageError as e:          # event_manager 가 보낼 수 없는 값을 만든 경우 (버그) - 서버는 계속
+            log.error("%s 에 보낼 %s 를 인코딩하지 못함: %s", node, type_, e)
+            return False
+        try:
+            conn.writer.write(data)
             await conn.writer.drain()
             log.debug("-> %s %s %s", node, type_, value)
             return True
@@ -171,37 +176,18 @@ class HubServer:
         peer = writer.get_extra_info("peername")
         log.info("접속: %s", peer)
         node_name = None
+        frames = FrameReader()
         try:
             while True:
-                line = await reader.readline()
-                if not line:
+                chunk = await reader.read(65536)
+                if not chunk:
                     break
-                line = line.strip()
-                if not line:
-                    continue
                 rx_ts = time.time()
-                try:
-                    msg = parse_message(line)
-                except MessageError as e:
-                    log.warning("%s 잘못된 메시지: %s", peer, e)
-                    continue
-
-                # 첫 메시지의 node 이름으로 연결 등록 (같은 이름이 다시 오면 예전 연결을 끊음)
-                if node_name is None:
-                    node_name = msg["node"]
-                    peer_str = f"{peer[0]}:{peer[1]}" if peer else "?"
-                    old = self.nodes.get(node_name)
-                    if old and old.writer is not writer:
-                        old.writer.close()
-                    self.nodes[node_name] = NodeConn(node_name, writer, rx_ts,
-                                                     peer=peer_str, connected_ts=rx_ts)
-                    log.info("노드 등록: %s (%s)", node_name, peer_str)
-                    await self.on_connect(node_name, rx_ts)
-
-                try:
-                    await self.on_message(self.nodes[node_name], msg, rx_ts)
-                except Exception:          # 메시지 하나의 오류로 연결을 끊지 않는다
-                    log.exception("%s 메시지 처리 중 오류 - 이 메시지만 버림: %s", node_name, msg)
+                received = frames.feed(chunk)
+                while frames.errors:       # 시작 표시 없음·CRC 불일치: 바이트를 건너뛰고 연결은 유지
+                    log.warning("%s(%s) 스트림 오류: %s", node_name or "?", peer, frames.errors.pop(0))
+                for frame in received:
+                    node_name = await self.on_frame(frame, node_name, writer, peer, rx_ts)
         except (ConnectionError, asyncio.IncompleteReadError) as e:
             log.info("%s 연결 오류: %s", peer, e)
         except Exception:
@@ -212,6 +198,35 @@ class HubServer:
                 await self.set_offline(conn, "연결 종료")
             writer.close()
             log.info("연결 종료: %s (%s)", node_name, peer)
+
+    async def on_frame(self, frame: bytes, node_name, writer, peer, rx_ts: float):
+        """프레임 하나 처리. 연결의 노드 이름(처음이면 등록한 이름)을 돌려준다."""
+        try:
+            msg = parse_message(frame)
+        except MessageError as e:
+            log.warning("%s(%s) 잘못된 메시지: %s", node_name or "?", peer, e)
+            return node_name
+
+        # 첫 메시지의 node 이름으로 연결 등록 (같은 이름이 다시 오면 예전 연결을 끊음)
+        if node_name is None:
+            node_name = msg["node"]
+            peer_str = f"{peer[0]}:{peer[1]}" if peer else "?"
+            old = self.nodes.get(node_name)
+            if old and old.writer is not writer:
+                old.writer.close()
+            self.nodes[node_name] = NodeConn(node_name, writer, rx_ts,
+                                             peer=peer_str, connected_ts=rx_ts)
+            log.info("노드 등록: %s (%s)", node_name, peer_str)
+            await self.on_connect(node_name, rx_ts)
+        elif msg["node"] != node_name:
+            log.warning("%s 연결에서 다른 노드 이름(%s)의 메시지 - 버림", node_name, msg["node"])
+            return node_name
+
+        try:
+            await self.on_message(self.nodes[node_name], msg, rx_ts)
+        except Exception:                  # 메시지 하나의 오류로 연결을 끊지 않는다
+            log.exception("%s 메시지 처리 중 오류 - 이 메시지만 버림: %s", node_name, msg)
+        return node_name
 
     async def on_connect(self, node: str, now: float):
         await self.apply(self.events.on_node_online(node, True, now))

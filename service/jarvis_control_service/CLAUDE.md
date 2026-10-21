@@ -55,6 +55,7 @@ aiot_repo_3/
 ```bash
 python3 run_hub.py                                  # control 서버 (또는 python3 -m hub -v)
 python3 -m unittest tools.test_event_manager -v     # event_manager 단위 테스트 (가짜 시계)
+python3 -m unittest tools.test_protocol -v          # 바이너리 프레임 단위 테스트 (왕복, 스트림 쪼개짐, CRC, 깨진 바이트)
 python3 -m tools.fake_node --server 127.0.0.1       # 통신 시나리오: 질문 → 쓰러짐 선점 → confirm/resolve
 python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fall_alert 까지
 ```
@@ -121,12 +122,26 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 | `leave_seat` | `away` | 3 |
 | `drowsy`, `posture` | 삭제 → `condition_summary`(집계) | - |
 
-공통 메시지 형식 (기존 형식 유지):
+공통 메시지 형식 — **TCP 위의 바이너리 프레임 v3** (10/21 변경, 기준은 `common/protocol.py` 맨 위 설명):
 
-```json
-{"v":1, "node":"vision_service", "seq":1042, "type":"question", "seat":2,
- "ts":1760500000.123, "value":{"state":"start"}, "conf":0.81}
-```
+| 바이트 | 필드 | 형식 | 내용 |
+| --- | --- | --- | --- |
+| 0-1 | magic | 2s | `0xAA 0x55` |
+| 2 | version | uint8 | 3 (v1 = 줄 단위 JSON 폐기. 2번은 student_client 시험 패킷이 써서 건너뜀) |
+| 3 | node | uint8 | `NODE_CODES`: control 0 · vision 1 · camera 2 · console 3 · student 11~14 (DB `device.node`와 같음) |
+| 4 | type | uint8 | `TYPE_CODES`: 공통 0x0_ · 사건 0x1_ · vision 0x2_ · camera 0x3_ · console 0x4_ · student 0x5_ |
+| 5 | seat | uint8 | 1~4, 0 = 없음 |
+| 6-9 | seq | uint32 | |
+| 10-17 | ts | float64 | 보낸 PC 시각 |
+| 18-21 | conf | float32 | |
+| 22-25 | length | uint32 | 값 바이트 수 (최대 1 MiB) |
+| 26-… | payload | TLV | value dict (None/bool/int64/float64/str/list/dict 태그 인코딩) |
+| 끝 2 | crc | uint16 | CRC-16/CCITT (version ~ payload) |
+
+- 빅엔디언. 받는 쪽은 `FrameReader`로 시작 표시를 찾아 자르고, 헤더(버전·코드·길이)나 CRC가 틀리면 1바이트씩 밀어 다시 찾는다 (연결은 유지).
+- `encode()`/`parse_message()`가 주고받는 dict는 예전과 같다. 노드 코드와 `event_manager`는 형식을 모른다:
+  `{"v":3, "node":"vision_service", "seq":1042, "type":"question", "seat":2, "ts":1760500000.123, "value":{"state":"start"}, "conf":0.81}`
+- 새 노드·메시지 종류를 추가할 때는 `NODE_CODES`/`TYPE_CODES`에도 번호를 준다 (안 맞으면 import 할 때 assert 로 멈춤).
 
 - `ts`는 보낸 PC의 시계. Control은 받는 순간 `rx_ts`(Control 시계)를 붙이고 **모든 판단은 `rx_ts`로 한다.**
 - Interface Specification(IF-01~05)과 다르면 코드가 기준이다.
@@ -261,6 +276,7 @@ track:
 | 단계 | 방법 | 확인 |
 | --- | --- | --- |
 | 단위 | `event_manager`에 가짜 시계 + 사건 순서대로 | 선점, FIFO, 15/30초 알림, 만료, 중복 무시 |
+| 단위 | `tools/test_protocol.py` | 바이너리 프레임 왕복, 헤더 배치, 쪼개짐·붙음, CRC, 옛 형식 거부 |
 | 통신 | `tools/fake_node.py`로 vision_service·instructor_console 흉내 | question start → event_update → confirm → resolve → queue_state |
 | 통합 1 (10/20) | 실제 Vision B → Control → 대시보드 → 팬틸트 preset | 질문 1건이 끝까지 흐르는지 |
 | 통합 2 | 질문 추적 중 쓰러짐 | 선점, 학생 노트북 fall_alert |
