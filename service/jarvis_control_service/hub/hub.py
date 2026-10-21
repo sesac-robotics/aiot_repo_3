@@ -2,8 +2,9 @@
 control(hub) TCP 서버 (상세 설계 0·5·6장)
 
 - 노드 <-> control: TCP 위의 줄 단위 JSON (common/protocol.py), 포트 5000
-- 받은 메시지는 messages 표에 기록 (heartbeat, track_offset 은 제외)
-- heartbeat -> node_status, node_info -> nodes(접속 PC)
+- 원본 메시지는 DB 에 기록하지 않는다 (Data Structure v2: messages·nodes·node_status 폐지)
+- heartbeat -> device.last_seen (학생: rtt_ms·cam_ok, vision: cam1/cam2 -> 장비 21·22)
+- device_update -> device + device_log, class_condition -> class_condition 표
 - 사건(fall / question / away)에는 rx_ack 로 수신 확인을 보내고 event_manager 에 넘긴다
 - 판단은 하지 않는다. 입력을 event_manager 에 넘기고, 돌려받은 할 일을
   db.py 로 기록하고 해당 노드에 보낸다.
@@ -23,7 +24,7 @@ from common.config import load_config
 from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
                              INCIDENT_TYPES, NOT_LOGGED_TYPES, MessageError, encode,
                              make_message, parse_message, student_seat)
-from hub.control_config import DB_PATH, load_control_config
+from hub.control_config import DB_PATH, ConfigError, load_control_config
 from hub.db import Database, SchemaMismatch
 from hub.event_manager import Effects, EventManager, HelpEvent
 
@@ -50,6 +51,7 @@ class HubServer:
         self.host, self.port = host, port
         self.db_path = db_path
         self.db = Database(db_path)
+        self.db.reset_devices(time.time())
         cfg = control_cfg or load_control_config()
         self.db.sync_seats(cfg["seats"])
         open_events = [HelpEvent(**row) for row in self.db.load_open_events()]
@@ -81,9 +83,27 @@ class HubServer:
         """event_manager 가 정한 할 일: DB 기록 -> 전송."""
         if not fx:
             return
-        self.db.apply(fx.saves, fx.logs)
+        try:
+            self.db.apply(fx.saves, fx.logs)
+            self.record_sends(fx.sends, time.time())
+        except Exception:                  # 기록이 실패해도 화면·장비에는 보낸다 (쓰러짐을 놓치지 않게)
+            log.exception("DB 기록 실패 - 전송은 계속")
         for s in fx.sends:
             await self.send(s.to, s.type, s.value, s.seat)
+
+    def record_sends(self, sends, now: float):
+        """보내는 메시지 중 DB 에 남기는 것 (판단 없이 내용 그대로 기록)."""
+        for s in sends:
+            if s.type == "device_update":
+                try:
+                    self.db.set_device_online(s.value["node"], s.value["online"], now,
+                                              s.value.get("note"))
+                except ValueError:         # device 표에 없는 노드 (템플릿 노드 등)
+                    log.debug("device 표에 없는 노드: %s", s.value.get("node"))
+            elif s.type == "class_condition":
+                self.db.insert_class_condition(now, s.value["focus_low_ratio"],
+                                               s.value["posture_bad_ratio"],
+                                               s.value.get("reporting", 0))
 
     # ---- 연결 처리 -----------------------------------------------------
     async def handle_client(self, reader: asyncio.StreamReader,
@@ -118,11 +138,14 @@ class HubServer:
                     log.info("노드 등록: %s (%s)", node_name, peer_str)
                     await self.on_connect(node_name, rx_ts)
 
-                await self.on_message(self.nodes[node_name], msg, rx_ts)
+                try:
+                    await self.on_message(self.nodes[node_name], msg, rx_ts)
+                except Exception:          # 메시지 하나의 오류로 연결을 끊지 않는다
+                    log.exception("%s 메시지 처리 중 오류 - 이 메시지만 버림: %s", node_name, msg)
         except (ConnectionError, asyncio.IncompleteReadError) as e:
             log.info("%s 연결 오류: %s", peer, e)
         except Exception:
-            log.exception("%s(%s) 메시지 처리 중 오류 - 연결을 끊음", node_name, peer)
+            log.exception("%s(%s) 연결 처리 중 오류 - 연결을 끊음", node_name, peer)
         finally:
             conn = self.nodes.get(node_name) if node_name else None
             if conn and conn.writer is writer and conn.online:
@@ -131,7 +154,6 @@ class HubServer:
             log.info("연결 종료: %s (%s)", node_name, peer)
 
     async def on_connect(self, node: str, now: float):
-        self.db.set_node_online(node, True)
         await self.apply(self.events.on_node_online(node, True, now))
         if node == CONSOLE_NODE:
             await self.send(CONSOLE_NODE, "snapshot", self.events.snapshot())
@@ -139,7 +161,6 @@ class HubServer:
     async def set_offline(self, conn: NodeConn, reason: str):
         conn.online = False
         log.warning("%s: %s", reason, conn.name)
-        self.db.set_node_online(conn.name, False)
         await self.apply(self.events.on_node_online(conn.name, False, time.time()))
 
     # ---- 메시지 처리 ---------------------------------------------------
@@ -150,7 +171,6 @@ class HubServer:
 
         t, v, seat = msg["type"], msg["value"], msg.get("seat")
         if t not in NOT_LOGGED_TYPES:
-            self.db.insert_message(msg, rx_ts)
             log.debug("<- %s %s seat=%s %s", conn.name, t, seat, v)
 
         if t == "heartbeat":
@@ -159,7 +179,10 @@ class HubServer:
                 conn.online = True
                 log.info("하트비트 복구: %s", conn.name)
                 await self.on_connect(conn.name, rx_ts)
-            self.db.upsert_node_status(conn.name, msg["ts"], v)
+            try:
+                self.db.touch_device(conn.name, rx_ts, v)
+            except ValueError:
+                pass
         elif t == "node_info":
             self.on_node_info(conn, msg)
         elif t in INCIDENT_TYPES:
@@ -196,7 +219,6 @@ class HubServer:
         host = pc.get("hostname")
         if host:
             conn.hostname = host
-            self.db.upsert_node_pc(conn.name, pc, conn.peer, conn.connected_ts, msg["ts"])
         log.info("노드 정보: %s @ %s (%s, %s)", conn.name, host or "?",
                  pc.get("ip") or conn.peer, pc.get("os") or "?")
 
@@ -247,7 +269,7 @@ def main():
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         server = HubServer(args.host, port, args.db)
-    except SchemaMismatch as e:
+    except (SchemaMismatch, ConfigError) as e:
         log.error("%s", e)
         raise SystemExit(1)
     try:

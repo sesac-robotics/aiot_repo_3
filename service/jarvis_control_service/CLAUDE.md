@@ -71,7 +71,7 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 
 - 질문 만료는 **강사가 confirm하지 않은 질문만** 해당된다.
 - 자리비움 미복귀 재알림은 한 번만 하고, `event_update`의 `overdue=true`로 알린다.
-- `hand_down`(손 내림), `risen`(일어남), `overdue`는 화면 표시용이라 `event_update`에만 싣고 DB에는 없다.
+- `risen`(일어남), `overdue`는 화면 표시용이라 `event_update`에만 싣고 DB에는 없다. `hand_down`은 v2부터 DB에 저장한다.
 - 쓰러짐이 `end`(일어남)여도 confirm 전까지 단계 알림은 계속된다.
 - `fall_alert_cancel`은 그 단계에서 알림을 받은 학생에게만 보낸다(neighbor면 옆자리, all이면 전체).
 - `track_offset`은 메시지의 `seat`이 지금 active 좌석과 같아야 처리한다. Vision은 `seat`을 꼭 채운다.
@@ -148,7 +148,7 @@ control ↔ camera_controller:
 
 | 방향 | type | value | 때 |
 | --- | --- | --- | --- |
-| ↓ | `pan_tilt` | `{"mode":"preset","seat":2}` | 추적 대상 변경 시. 각도는 control.yaml |
+| ↓ | `pan_tilt` | `{"mode":"preset","seat":2,"pan":80,"tilt":85}` | 추적 대상 변경 시. 각도는 control이 control.yaml에서 읽어 싣는다 |
 | ↓ | `pan_tilt` | `{"mode":"nudge","dpan":1.5,"dtilt":-0.8}` | `track_offset` 수신 시 (최대 10Hz) |
 | ↓ | `pan_tilt` | `{"mode":"home"}` | 대상 없을 때 |
 | ↑ | `pan_tilt_state` | `{"pan":95,"tilt":80,"ok":true}` | 명령 적용 후 (Serial `OK` 전달) |
@@ -225,45 +225,27 @@ track:
 
 ## DB (`service/jarvis_DB/create.sql`)
 
-```sql
-CREATE TABLE IF NOT EXISTS seat (
-  seat       INTEGER PRIMARY KEY,         -- 1~4
-  label      TEXT,
-  pan        REAL, tilt REAL,
-  neighbors  TEXT                         -- "2,4"
-);
+원본: Confluence "Data Structure" v2 (2026-10-21) 2장. 스키마는 create.sql 이 기준이고 `SCHEMA_VERSION = 3`.
 
-CREATE TABLE IF NOT EXISTS help_event (
-  event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-  seat          INTEGER NOT NULL REFERENCES seat(seat),
-  kind          TEXT NOT NULL,            -- fall | question | away
-  priority      INTEGER NOT NULL,
-  status        TEXT NOT NULL,            -- active | waiting | closed
-  detected_at   REAL NOT NULL,            -- Control 시계
-  confirmed_at  REAL, confirmed_by TEXT,
-  closed_at     REAL, close_reason TEXT,  -- resolved | expired | cleared
-  alert_stage   TEXT DEFAULT 'none',      -- none | neighbor | all
-  explain_text  TEXT, explain_mode TEXT,
-  source        TEXT                      -- "vision_service:1042"
-);
+| 테이블 | 내용 |
+| --- | --- |
+| `seat` | 좌석 1~4: label, neighbors(2×2), device_node(11~14), has_preset, reg_id(지금 앉은 학생) |
+| `seat_registration` | 자리 등록 이력: 이름, baseline(JSON 7개), zones, registered_at, replaced_at(NULL=현재) |
+| `device` / `device_log` | 장비(0 control · 1 vision · 2 팬틸트(가상) · 3 console · 11~14 학생 · 21 cam1 · 22 cam2) / 연결 이력 |
+| `help_event` | 도움 이벤트 (숫자 코드), reg_id = 그때 앉아 있던 학생, hand_down 저장 |
+| `event_log` | 이벤트 처리 기록, actor = 장비 번호 (0 system) |
+| `event_clip` | 이벤트 녹화 (cam2), status 1 녹화 중 · 2 저장됨 · 3 삭제됨 |
+| `class_condition` | 반 평균 (10초마다) |
+| `app_setting` | 강사 화면 [설정] (JSON 값) |
 
-CREATE TABLE IF NOT EXISTS event_log (
-  log_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_id  INTEGER NOT NULL REFERENCES help_event(event_id),
-  ts        REAL NOT NULL,
-  action    TEXT NOT NULL,  -- detect | activate | preempt | wait | confirm | alert | resolve | expire | clear
-  actor     TEXT NOT NULL,  -- system | instructor_console | student_client_N
-  detail    TEXT            -- JSON
-);
-```
-
-기존 테이블:
-- `messages` 유지. 하트비트와 `track_offset`은 기록 안 함. `ts`와 `rx_ts` 둘 다 저장.
-- `nodes` 유지.
-- `node_status` 유지 + `online`, `cam1_fps`, `cam2_fps` 추가.
-- `cameras`, `seats`(노드 보고 방식) 폐지. 좌석은 yaml → `seat` 테이블.
-
-- 이름과 영상은 저장하지 않는다. 학생은 좌석 번호로만 구분.
+- 상태값은 Interface Spec 숫자 코드: kind 1 fall · 2 question · 3 away / status 1 active · 2 waiting · 3 closed /
+  alert_stage 0 · 1 neighbor · 2 all · 3 long / close_reason 0 · 1 resolved · 2 false_alarm · 3 expired · 4 cleared /
+  explain_mode 0 · 1 gemini · 2 ollama · 3 default.
+- `event_manager`는 계속 문자열로 다룬다. 문자열 ↔ 숫자, 노드 이름 ↔ 장비 번호 변환은 `db.py`에서만 한다.
+- `messages`, `nodes`, `node_status` 폐지. heartbeat·track_offset·원본 메시지는 기록하지 않는다.
+  heartbeat는 `device.last_seen`(학생은 `rtt_ms`·`cam_ok`, vision은 `cam1_fps`/`cam2_fps` → 장비 21·22)만 갱신.
+- `device_update`, `class_condition`을 보낼 때 hub가 그 내용을 `device`·`device_log`, `class_condition`에 기록한다.
+- 외래 키(PRAGMA foreign_keys)는 켜지 않는다 (seat ↔ device, seat ↔ seat_registration 순환 참조).
 - 스키마를 바꾸면 개발 중에는 `db/hub.db`를 지우고 다시 만든다. 마이그레이션 안 함.
 
 ## 구현 규칙

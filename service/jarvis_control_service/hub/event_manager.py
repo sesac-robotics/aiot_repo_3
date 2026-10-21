@@ -21,10 +21,11 @@ log = logging.getLogger("event_manager")
 
 SYSTEM = "system"
 
-# help_event 표에 저장하는 열 (create.sql 과 같은 순서)
+# help_event 표에 저장하는 값 (문자열 그대로. 숫자 코드로 바꾸는 일은 db.py 가 한다)
+# reg_id·gen 은 db.py 가 채운다. source 는 DB 에 없다 (event_log detect 의 detail 에만).
 DB_FIELDS = ("event_id", "seat", "kind", "priority", "status", "detected_at",
              "confirmed_at", "confirmed_by", "closed_at", "close_reason",
-             "alert_stage", "explain_text", "explain_mode", "source")
+             "alert_stage", "hand_down", "explain_text", "explain_mode")
 
 
 @dataclass
@@ -43,9 +44,9 @@ class HelpEvent:
     explain_text: str | None = None
     explain_mode: str | None = None
     source: str | None = None
+    hand_down: bool = False         # question end: 손을 내림 (닫지 않음). DB help_event.hand_down
     # ---- 화면 표시용 (DB 에는 없음) ----
-    hand_down: bool = False         # question end: 손을 내림 (닫지 않음)
-    risen: bool = False             # fall end: 일어남 (닫지 않음, 사람이 판단)
+    risen: bool = False            # fall end: 일어남 (닫지 않음, 사람이 판단)
     overdue: bool = False           # away 가 away_alert_s 지나도록 미복귀
 
     @property

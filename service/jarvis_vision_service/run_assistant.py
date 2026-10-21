@@ -13,6 +13,7 @@ vision_service 노드 실행 파일. VS Code에서 이 파일을 열고 Run Code
 import argparse
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -36,13 +37,20 @@ def on_message(client: NodeClient, msg: dict):
         track_seat = v.get("seat")
         print(f"<- track_target: {track_seat}")
     elif t == "explain_request":
-        # TODO: LLM 으로 상황 설명 만들기 (Gemini -> 실패하면 Ollama -> 실패하면 기본 문구)
-        client.send("explain_text", value={"event_id": v["event_id"],
-                                           "text": f"{v['seat']}번 좌석 {v['kind']}", "mode": "default"})
+        # LLM 호출은 느리므로 따로 돌린다 (수신 스레드를 막으면 track_target 이 늦게 온다)
+        threading.Thread(target=explain, args=(client, v), daemon=True).start()
+
+
+def explain(client: NodeClient, req: dict):
+    """TODO: LLM 으로 상황 설명 만들기 (Gemini -> 실패하면 Ollama -> 실패하면 기본 문구).
+    text 는 꼭 문자열로 보낸다 (control 이 문자열이 아니면 버림)."""
+    client.send("explain_text", value={"event_id": req["event_id"],
+                                       "text": f"{req['seat']}번 좌석 {req['kind']}", "mode": "default"})
 
 
 def detect() -> dict:
-    """TODO: 카메라 프레임을 보고 좌석별 상태를 돌려준다. 예: {(2, "question"): True}"""
+    """TODO: 카메라 프레임을 보고 좌석별 상태를 돌려준다. 예: {(2, "question"): True}
+    지금 켜진 것만 돌려줘도 된다 (빠진 키는 False 로 보고 end 를 보낸다)."""
     return {}
 
 
@@ -74,7 +82,8 @@ def main():
 
             # [사건] 상태가 바뀐 순간(엣지)에만 start/end 를 보낸다
             state = detect()
-            for (seat, kind), on in state.items():
+            for seat, kind in prev.keys() | state.keys():      # 결과에서 빠진 것은 False (end)
+                on = state.get((seat, kind), False)
                 if on != prev.get((seat, kind), False):
                     client.send(kind, seat=seat, value={"state": "start" if on else "end"})
             prev = state
