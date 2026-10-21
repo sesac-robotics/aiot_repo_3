@@ -7,6 +7,7 @@
 시작: 좌석(--seat) 저장값이 있으면 불러와 바로 모니터링, 없거나 --register면 바른 자세 10초 → 방향 측정(영역마다 Space)
   → 좌석에 저장 (monitor/calib_flow.py, monitor/seat_store.py).
 손 듦(팔꿈치가 어깨 위, 손목이 귀 위)이면 자세 판정과 얼굴 일부를 멈춘다 (common/hand_raise.py).
+오래 앉아 있으면(--stretch-min, 기본 50분) state["rest"]에 "stretch"를 한 번 낸다 (monitor/sit_timer.py).
 
 프로젝트 루트에서 실행:
   python -m monitor.monitor_main
@@ -31,6 +32,7 @@ from monitor.display import RED, WHITE, YELLOW, paste_inputs, pending_text, post
 from monitor.face_stage import FaceStage
 from monitor.monitor_args import parse_args
 from monitor.seat_store import BASELINE_KEYS as CALIB_KEYS     # 자세 기준 + 정면 고개 각도
+from monitor.sit_timer import SitTimer
 
 
 def load_ensemble(args):
@@ -57,10 +59,11 @@ class Monitor(CalibFlowMixin):
         self.posture_filter = DurationFilter(self.pth.hold_sec, self.pth.release_sec)
         self.face_filter = make_face_filter(FaceThresholds())
         self.hand = HandRaise()
+        self.sit = SitTimer(args.stretch_min * 60, args.away_reset_sec)
         self.plabels = LABELS if self.ensemble is None else self.ensemble.labels
         self.show_input = args.show_input and need_mask
         self.base = None
-        self.state = {"present": False, "calibrating": False, "face": (), "posture": ()}   # 확정 상태 (전송용)
+        self.state = {"present": False, "calibrating": False, "face": (), "posture": (), "rest": ()}   # 확정 상태
 
     def judge_posture(self, d, clean, lms):
         if self.ensemble is None:
@@ -70,11 +73,15 @@ class Monitor(CalibFlowMixin):
     def mode_lines(self):
         face = self.face_stage.mode_lines()
         if self.ensemble is None:
-            return [("자세 판정: 규칙 (MediaPipe만)", WHITE)] + face
+            return [("자세 판정: 규칙 (MediaPipe만)", WHITE)] + face + [self.sit_line()]
         label, p, by_angle = self.ensemble.last
         tag = "  (목 꺾임 보정)" if by_angle else ""
         now_line = "      → 손 듦: 판정 멈춤" if self.hand.active else f"      → {self.plabels[label]} {p:.2f}{tag}"
-        return [(f"자세 판정: {self.ensemble.describe()}", WHITE), (now_line, WHITE)] + face
+        return [(f"자세 판정: {self.ensemble.describe()}", WHITE), (now_line, WHITE)] + face + [self.sit_line()]
+
+    def sit_line(self):
+        sec = self.sit.seated_sec(time.monotonic())
+        return (f"착석 {sec / 60:.1f}분 / 스트레칭 권유 {self.sit.stretch_sec / 60:.0f}분", WHITE)
 
     def pause_posture(self):
         """자세 판정 흐름을 비움 (확인 중 시간, 결합 확률 평활). 다시 시작하면 처음부터"""
@@ -96,8 +103,9 @@ class Monitor(CalibFlowMixin):
         draw_arm_points(frame, pose_lms, hand)
         draw_face_points(frame, face_res)
 
-        self.state = {"present": not (p_raw is None and f is None), "calibrating": self.calib.active,
-                      "face": (), "posture": ()}
+        present = not (p_raw is None and f is None)
+        self.state = {"present": present, "calibrating": self.calib.active,
+                      "face": (), "posture": (), "rest": self.sit.update(present, now)}
         if p_raw is None and f is None:                 # 사람 없음
             self.posture_filter.reset()
             self.face_filter.reset()
