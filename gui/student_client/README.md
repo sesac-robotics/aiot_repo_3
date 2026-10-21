@@ -1,22 +1,36 @@
 # student_client: 학생 노드 (얼굴·자세 판정)
 
+> **control(hub) 연동 (2026-10-21)**: `run_client.py`를 실행하면 웹캠 판정(`monitor/seat_link_main.py`)이 시작되고, 판정 결과를 control에 직접 보낸다.
+> - 형식: 팀 공통 바이너리 프레임 v3(`common/protocol.py`), 포트 5000, IP는 `config/common.yaml`의 `control_host`
+> - 보내는 값: `condition_summary {"focus_low", "posture_bad"}` (10초마다)
+>   - `focus_low` = 졸음·하품·전방 주시 미흡 중 하나라도 확정, `posture_bad` = 앞으로 숙임 확정 (`monitor/condition.py`의 `to_summary`)
+> - 받는 값: `fall_alert` / `fall_alert_cancel` → 화면에 빨간 줄로 표시, **f 또는 Enter**로 `fall_confirm`
+> - 연결 코드: `seat_link/control_link.py` (`run_client.py`도 같은 코드를 씀)
+> - 좌석은 1~4만 쓴다. 같은 좌석으로 두 개를 동시에 띄우지 않는다 (control이 먼저 붙은 쪽을 끊음)
+> - 카메라 없이 연결·알림만 시험: `python3 run_client.py --seat 1 --no-camera`
+> - 아래의 바이너리 패킷 v2(`packet.py`, `sender.py`, `test_receiver.py`)는 **폐기된 시험 형식**이다. control은 받지 않는다 (v3로 대체)
+>
+> ```bash
+> cd service/jarvis_control_service && python3 run_hub.py          # 1. control (관제 노트북)
+> python3 gui/student_client/run_client.py --seat 1                  # 2. 학생 PC (같은 PC 시험이면 --server 127.0.0.1)
+> ```
+
 학생 PC 웹캠으로 **얼굴 상태(졸음·하품·전방 주시)**와 **앉은 자세(앞으로 숙임·고개 기울임·어깨 비대칭)**를 판정하고, 결과를 TCP로 보내는 학생 노드.
 요구사항: SR_006 학습 집중 지원, SR_007 바른 자세 유지 지원
 
 > 상태 (2026-10-19)
 > - 자세: 학습 모델(수치 MLP + 이미지 CNN 6개) 실시간 적용
 > - 얼굴: 실시간은 MediaPipe 규칙 판정. 학습 모델(시계열 + 이미지 CNN) 반영 예정
-> - 전송: 바이너리 패킷 v2는 **시험용 임시 형식**. 받는 쪽 프로토콜이 정해지면 변경
-> - `run_client.py`(팀 노드)와의 연결은 아직 안 함
+> - 전송: control(hub)와 팀 공통 바이너리 프레임 v3로 연결됨 (위 안내). 예전 패킷 v2는 폐기
 
 ## 폴더 구조
 
 | 폴더·파일 | 역할 |
 |---|---|
-| `run_client.py` | 팀 학생 노드 (control 접속, 쓰러짐 알림, condition_summary) |
+| `run_client.py` | 학생 PC 실행 파일: 웹캠 판정 + control 전송 (`seat_link_main` 실행). `--no-camera`면 연결만 시험 |
 | `seat_common/` | 공용 모듈: MediaPipe 특징 추출, 기준 자세 등록, 규칙 판정, 지속 시간 필터, 한글 출력 |
 | `monitor/` | 실시간 프로그램 (`monitor_main.py`, `seat_link_main.py`), 자세 앙상블, 전송용 상태 요약 |
-| `seat_link/` | 바이너리 패킷(`packet.py`), TCP 송신기(`sender.py`), 시험용 수신기(`test_receiver.py`) |
+| `seat_link/` | control 연결(`control_link.py`), 시험용 바이너리 패킷(`packet.py`, `sender.py`, `test_receiver.py`) |
 | `collect/` | 학습 데이터 수집 도구 (자세, 얼굴 + 시선 영역 캘리브레이션) |
 | `learning/` | 데이터셋, 모델 학습 (수치 MLP, 이미지 CNN, 시계열) |
 | `evaluation/` | 방식 비교, 이벤트 지표, Grad-CAM |
@@ -58,17 +72,20 @@ python -m monitor.monitor_main                 # 실시간 판정 (화면만)
 python -m monitor.monitor_main --rule          # 학습 모델 없이 MediaPipe 규칙만
 ```
 
-바이너리 전송 시험 (터미널 2개):
+control 연동 시험 (같은 PC, 터미널 2개):
 ```bash
-python -m seat_link.test_receiver --port 6000                                       # 1. 수신기
-python -m monitor.seat_link_main --server 127.0.0.1 --port 6000 --seat 1 --interval 2  # 2. 판정 + 전송
+cd ../../service/jarvis_control_service && python3 run_hub.py      # 1. control
+python3 run_client.py --seat 1 --server 127.0.0.1 --interval 5     # 2. 판정 + 전송 (이 폴더에서)
 ```
+- control 쪽 확인: `grep hub.student logs/hub.log` 에 `수신 OK student_client_1 condition_summary ...` 가 찍히면 성공
 
 - 시작하면 **바른 자세 10초** 기준 등록 (허리를 펴고 화면 정면)
 - 키: `c` 기준 다시 등록, `ESC` 종료
 - 판정은 지속 시간 필터로 확정: 졸음 1.5초, 하품 1초, 전방 주시 미흡 2초, 자세 3초
 
-## 바이너리 패킷 v2 (시험용, 14바이트, 빅엔디언)
+## (폐기) 바이너리 패킷 v2 (시험용, 14바이트, 빅엔디언)
+
+> 지금 쓰는 형식은 `common/protocol.py`의 프레임 v3 (`service/jarvis_control_service/CLAUDE.md` 메시지 형식 표). 아래는 기록용.
 
 | 바이트 | 필드 | 값 |
 |---|---|---|
