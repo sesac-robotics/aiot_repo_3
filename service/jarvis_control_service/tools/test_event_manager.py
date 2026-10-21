@@ -1,6 +1,6 @@
 """
 event_manager 단위 테스트 (상세 설계 9장 "단위"): 가짜 시계로 사건을 순서대로 넣는다.
-확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 추적 nudge
+확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 팬틸트 연동(preset/home/track, gen)
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m unittest tools.test_event_manager -v
 """
@@ -16,6 +16,7 @@ from hub.control_config import CONTROL_DEFAULTS       # noqa: E402
 from hub.event_manager import EventManager            # noqa: E402
 
 T0 = 1000.0
+PT = "pantilt"                                        # [팬틸트]
 
 
 def sends(fx, type_=None, to=None):
@@ -37,8 +38,8 @@ class EventManagerTest(unittest.TestCase):
     def test_first_event_becomes_active_and_tracked(self):
         fx = self.start("question", 2, 0)
         self.assertEqual(self.queue(), {"active": 1, "waiting": []})
-        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 2})
-        self.assertEqual(sends(fx, "pan_tilt")[0].value, {"mode": "preset", "seat": 2})
+        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 2, "gen": 1})          # [팬틸트] gen
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 1, "seat": 2, "kind": 2})  # [팬틸트]
         self.assertEqual(len(sends(fx, "explain_request")), 1)
         self.assertEqual(len(sends(fx, "event_update")), 1)
         self.assertEqual([l[2] for l in fx.logs], ["detect", "activate"])
@@ -61,7 +62,8 @@ class EventManagerTest(unittest.TestCase):
         self.start("question", 2, 0)
         fx = self.start("fall", 3, 1)
         self.assertEqual(self.queue(), {"active": 2, "waiting": [1]})
-        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 3})
+        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 3, "gen": 2})          # [팬틸트] gen
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 2, "seat": 3, "kind": 1})  # [팬틸트]
         self.assertIn("preempt", [l[2] for l in fx.logs])
 
     def test_away_waits_behind_question(self):
@@ -74,11 +76,12 @@ class EventManagerTest(unittest.TestCase):
         self.start("fall", 3, 1)
         fx = self.m.on_resolve(2, T0 + 5, "instructor_console")
         self.assertEqual(self.queue(), {"active": 1, "waiting": []})
-        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 2})
+        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 2, "gen": 3})          # [팬틸트] gen
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 3, "seat": 2, "kind": 2})  # [팬틸트]
         fx = self.m.on_resolve(1, T0 + 6, "instructor_console")
         self.assertEqual(self.queue(), {"active": None, "waiting": []})
-        self.assertEqual(sends(fx, "pan_tilt")[0].value, {"mode": "home"})
-        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": None})
+        self.assertEqual(sends(fx, "home", PT)[0].value, {"gen": 4})                         # [팬틸트]
+        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": None, "gen": 4})       # [팬틸트] gen
 
     # ---- end 처리 -------------------------------------------------------
     def test_question_end_only_marks_hand_down(self):
@@ -158,15 +161,23 @@ class EventManagerTest(unittest.TestCase):
         self.assertTrue(sends(fx, "event_update")[0].value["overdue"])
         self.assertFalse(sends(self.m.tick(T0 + 70), "event_update"))
 
-    # ---- 추적 -----------------------------------------------------------
-    def test_track_offset_only_for_active_seat_and_rate_limited(self):
+    # ---- 추적 ([팬틸트] nudge 시험 대체: 좌표를 그대로 팬틸트로, 지난 gen 은 버림) ----
+    def test_track_obs_passes_only_current_gen(self):                               # [팬틸트]
+        obs = {"frame_id": 7, "captured_at": T0 + 0.9, "status": "TRACKED", "cx": 0.6, "cy": 0.5}
+        self.assertFalse(self.m.on_track_obs(dict(obs, gen=0), T0 + 1))             # 사건 없음
+        self.start("question", 2, 0)                                                # gen 1
+        self.assertFalse(self.m.on_track_obs(dict(obs, gen=0), T0 + 1))             # 지난 gen
+        fx = self.m.on_track_obs(dict(obs, gen=1), T0 + 1)
+        self.assertEqual(sends(fx, "track", PT)[0].value,
+                         {"gen": 1, "cx": 0.6, "cy": 0.5, "captured_at": T0 + 0.9,
+                          "frame_id": 7, "found": True})
+        fx = self.m.on_track_obs(dict(obs, gen=1, status="LOST"), T0 + 1.1)
+        self.assertFalse(sends(fx, "track", PT)[0].value["found"])
+
+    def test_same_seat_kind_change_sends_new_preset(self):                          # [팬틸트]
         self.start("question", 2, 0)
-        self.assertFalse(sends(self.m.on_track_offset(3, {"found": True, "dx": 0.1, "dy": 0}, T0 + 1)))
-        fx = self.m.on_track_offset(2, {"found": True, "dx": 0.25, "dy": -0.1}, T0 + 1)
-        self.assertEqual(sends(fx, "pan_tilt")[0].value, {"mode": "nudge", "dpan": 2.0, "dtilt": -0.8})
-        self.assertFalse(sends(self.m.on_track_offset(2, {"found": True, "dx": 0.1, "dy": 0}, T0 + 1.05)))
-        self.assertTrue(sends(self.m.on_track_offset(2, {"found": True, "dx": 0.1, "dy": 0}, T0 + 1.11)))
-        self.assertFalse(sends(self.m.on_track_offset(2, {"found": False}, T0 + 2)))
+        fx = self.start("fall", 2, 1)                       # 같은 좌석, 질문 → 쓰러짐
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 2, "seat": 2, "kind": 1})
 
     # ---- 장비 / 반 집계 --------------------------------------------------
     def test_node_offline_device_update(self):
@@ -174,12 +185,33 @@ class EventManagerTest(unittest.TestCase):
         fx = self.m.on_node_online("vision_service", False, T0 + 7)
         self.assertEqual(sends(fx, "device_update")[0].value,
                          {"node": "vision_service", "online": False, "note": "감지 중단"})
+        self.assertEqual(sends(fx, "vision_online", PT)[0].value, {"online": False})   # [팬틸트]
         self.assertFalse(self.m.on_node_online("vision_service", False, T0 + 8))
 
-    def test_camera_reconnect_gets_current_preset(self):
+    def test_vision_reconnect_gets_current_target(self):                            # [팬틸트] camera_reconnect 대체
         self.start("question", 4, 0)
-        fx = self.m.on_node_online("camera_controller", True, T0 + 1)
-        self.assertEqual(sends(fx, "pan_tilt")[0].value, {"mode": "preset", "seat": 4})
+        fx = self.m.on_node_online("vision_service", True, T0 + 1)
+        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 4, "gen": 1})
+        self.assertEqual(sends(fx, "vision_online", PT)[0].value, {"online": True})
+
+    def test_pantilt_safe_updates_device(self):                                     # [팬틸트]
+        state = {"state": 1, "pan": 81, "tilt": 90, "gen": 0, "error": 0}
+        fx = self.m.on_pantilt_state(state, T0)
+        self.assertTrue(sends(fx, "device_update")[0].value["online"])
+        self.assertFalse(self.m.on_pantilt_state(dict(state, state=3), T0 + 1))     # 정상 → 정상: 알림 없음
+        fx = self.m.on_pantilt_state(dict(state, state=7, error=1), T0 + 2)         # SAFE
+        self.assertEqual(sends(fx, "device_update")[0].value,
+                         {"node": PT, "online": False, "note": "추적 중단 (알림은 계속)"})
+        self.assertEqual(self.m.pan_tilt["state"], 7)
+
+    def test_preset_register_flow(self):                                            # [팬틸트]
+        fx = self.m.on_pan_tilt_jog(1, -1, T0)
+        self.assertEqual(sends(fx, "jog", PT)[0].value, {"dpan": 1, "dtilt": -1})
+        fx = self.m.on_preset_save(2, T0 + 1)
+        self.assertEqual(sends(fx, "save", PT)[0].value, {"seat": 2})
+        fx = self.m.on_preset_saved({"seat": 2, "pan": 83, "tilt": 88}, T0 + 2)
+        self.assertEqual(sends(fx, "seat_preset", "db")[0].value, {"seat": 2, "has_preset": 1})
+        self.assertEqual(sends(fx, "preset_saved")[0].value, {"seat": 2, "pan": 83, "tilt": 88})
 
     def test_class_condition_ratio(self):
         self.m.tick(T0)
@@ -200,6 +232,8 @@ class EventManagerTest(unittest.TestCase):
         m2 = EventManager(self.cfg, 3, [HelpEvent(**r) for r in rows])
         self.assertEqual(m2.snapshot()["queue"], {"active": 2, "waiting": [1]})
         self.assertEqual(m2.next_id, 3)
+        fx = m2.start(T0 + 2)                                                       # [팬틸트] 재시작 후 팬틸트 복구
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 1, "seat": 3, "kind": 1})
 
 
 if __name__ == "__main__":
