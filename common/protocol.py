@@ -2,7 +2,7 @@
 노드·메시지 종류·좌석의 유일한 기준 (Control Server 상세 설계 4·5장)
 
 노드 <-> control: TCP 위의 바이너리 프레임 (메시지 하나 = 프레임 하나). 형식 v3
-  (v1 = 줄 단위 JSON, 더 이상 쓰지 않음. 2번은 student_client/seat_link 시험 패킷이 쓰고 있어 건너뜀 — control 은 받지 않는다)
+  (v1 = 줄 단위 JSON, 더 이상 쓰지 않음. 2번은 폐기된 student_client 시험 패킷이 썼으므로 건너뜀 — control 은 받지 않는다)
 
 프레임 (빅엔디언)
   바이트      필드        형식      내용
@@ -402,6 +402,10 @@ def _check_value(type_: str, v: dict):
     elif type_ == "track_offset":
         if v.get("found"):
             need(_is_num(v.get("dx", 0.0)) and _is_num(v.get("dy", 0.0)), "dx, dy 는 숫자")
+    elif type_ == "condition_summary":
+        # 필드 이름이 틀리면 반 집계에서 조용히 '정상'으로 세어지므로 받는 순간 버린다
+        need(all(isinstance(v.get(k), bool) for k in ("focus_low", "posture_bad")),
+             "focus_low, posture_bad 는 true/false")
     elif type_ == "heartbeat":
         need(all(v.get(k) is None or _is_num(v[k]) for k in ("fps", "cpu", "cam1_fps", "cam2_fps")),
              "fps, cpu, cam1_fps, cam2_fps 는 숫자")

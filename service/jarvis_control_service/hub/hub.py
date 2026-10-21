@@ -12,27 +12,39 @@ control(hub) TCP 서버 (상세 설계 0·5·6장)
 - 하트비트가 6초(3회) 안 오면 offline -> device_update
 - [팬틸트] 팬틸트는 TCP 노드가 아니라 같은 프로세스의 PanTiltService(hub/pantilt).
   to="pantilt" 할 일은 메서드 호출로 실행하고, 팬틸트 알림(on_event)은 이벤트 루프로 넘겨 처리한다.
+- 학생 노드 수신 기록 (로거 "hub.student"): condition_summary·fall_confirm 을 받을 때마다 "수신 OK",
+  형식이 틀려 버린 메시지는 "수신 실패", fall_alert 를 보내면 "전송 OK".
+  접속 중인데 condition_summary 가 30초 없으면 경고하고, 1분마다 좌석별 수신 현황을 한 줄로 남긴다.
+- 로그는 화면과 logs/hub.log (5MB × 5개 순환) 에 같이 남는다. 학생 수신만 보려면: grep hub.student logs/hub.log
 
-실행 (service/jarvis_control_service 폴더에서):  python3 -m hub [--host 0.0.0.0] [--port 5000] [--db 경로] [-v]
+실행 (service/jarvis_control_service 폴더에서):  python3 -m hub [--host 0.0.0.0] [--port 5000] [--db 경로] [--log-file 경로] [-v]
                                                  [--pantilt-port auto|/dev/ttyACM0] [--pantilt-sim]
 """
 
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import time
 from dataclasses import dataclass
 
 from common.config import load_config
 from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
                              INCIDENT_TYPES, NOT_LOGGED_TYPES, FrameReader, MessageError, encode,
-                             make_message, parse_message, student_seat)
-from hub.control_config import DB_PATH, ConfigError, load_control_config
+                             STUDENT_NODES, make_message, parse_message, student_seat)
+from hub.control_config import DB_PATH, SERVICE_DIR, ConfigError, load_control_config
 from hub.db import Database, SchemaMismatch
 from hub.event_manager import PANTILT, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT 추가
 from hub.pantilt import PanTiltService                                    # [팬틸트]
 
 log = logging.getLogger("hub")
+slog = logging.getLogger("hub.student")      # 학생 노드 수신·송신 기록 (grep hub.student)
+
+LOG_PATH = SERVICE_DIR / "logs" / "hub.log"
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+STUDENT_SUMMARY_TIMEOUT_S = 30.0             # condition_summary 가 이만큼 없으면 경고 (10초 주기 × 3, 반 집계 유효 시간과 같음)
+STUDENT_REPORT_INTERVAL_S = 60.0             # 좌석별 수신 현황 한 줄 요약 주기
+STUDENT_SEND_TYPES = {"fall_alert", "fall_alert_cancel"}
 
 TICK_INTERVAL_S = 0.1
 QUIET_SEND_TYPES = {"track_target", "explain_request"}   # 미접속이어도 경고 안 함 ([팬틸트] pan_tilt 는 TCP 로 안 보냄)
@@ -48,6 +60,10 @@ class NodeConn:
     hostname: str | None = None    # node_info 의 pc.hostname
     last_seq: int = -1
     online: bool = True
+    summary_count: int = 0                 # 이 연결에서 받은 condition_summary 수 (학생)
+    last_summary_ts: float | None = None
+    last_summary: dict | None = None
+    summary_stale: bool = False            # 30초 없음 경고를 이미 냈는지
 
 
 class HubServer:
@@ -70,6 +86,8 @@ class HubServer:
         self.pantilt_port = pantilt_port or cfg.get("pantilt", {}).get("port", "auto")   # [팬틸트] control.yaml pantilt.port
         self.pantilt_sim = pantilt_sim                                                    # [팬틸트]
         self.loop: asyncio.AbstractEventLoop | None = None                               # [팬틸트]
+        self._last_report = time.time()
+        self._report_counts: dict[str, int] = {}    # 지난 현황 요약 때의 summary_count
 
     # ---- 송신 ----------------------------------------------------------
     async def send(self, node: str, type_: str, value: dict, seat=None) -> bool:
@@ -89,6 +107,8 @@ class HubServer:
             conn.writer.write(data)
             await conn.writer.drain()
             log.debug("-> %s %s %s", node, type_, value)
+            if node in STUDENT_NODES and type_ in STUDENT_SEND_TYPES:
+                slog.info("전송 OK -> %s %s %s", node, type_, value)
             return True
         except (ConnectionError, OSError) as e:
             log.warning("%s 전송 오류: %s", node, e)
@@ -185,7 +205,8 @@ class HubServer:
                 rx_ts = time.time()
                 received = frames.feed(chunk)
                 while frames.errors:       # 시작 표시 없음·CRC 불일치: 바이트를 건너뛰고 연결은 유지
-                    log.warning("%s(%s) 스트림 오류: %s", node_name or "?", peer, frames.errors.pop(0))
+                    (slog if node_name in STUDENT_NODES else log).warning(
+                        "%s(%s) 스트림 오류 - 바이트 버림: %s", node_name or "?", peer, frames.errors.pop(0))
                 for frame in received:
                     node_name = await self.on_frame(frame, node_name, writer, peer, rx_ts)
         except (ConnectionError, asyncio.IncompleteReadError) as e:
@@ -204,7 +225,8 @@ class HubServer:
         try:
             msg = parse_message(frame)
         except MessageError as e:
-            log.warning("%s(%s) 잘못된 메시지: %s", node_name or "?", peer, e)
+            (slog if node_name in STUDENT_NODES else log).warning(
+                "수신 실패 %s(%s) - 잘못된 메시지 버림: %s", node_name or "?", peer, e)
             return node_name
 
         # 첫 메시지의 node 이름으로 연결 등록 (같은 이름이 다시 오면 예전 연결을 끊음)
@@ -229,6 +251,8 @@ class HubServer:
         return node_name
 
     async def on_connect(self, node: str, now: float):
+        if node in STUDENT_NODES:
+            self._report_counts[node] = 0
         await self.apply(self.events.on_node_online(node, True, now))
         if node == CONSOLE_NODE:
             await self.send(CONSOLE_NODE, "snapshot", self.events.snapshot())
@@ -278,17 +302,34 @@ class HubServer:
             if "event_id" in v:
                 await self.apply(self.events.on_resolve(v["event_id"], rx_ts, conn.name))
         elif t == "fall_confirm":
+            if conn.name in STUDENT_NODES:
+                slog.info("수신 OK %s fall_confirm target_seat=%s seq=%d", conn.name, v.get("target_seat"), msg["seq"])
             if "target_seat" in v:
                 await self.apply(self.events.on_fall_confirm(v["target_seat"], rx_ts, conn.name))
         elif t == "condition_summary":
             s = student_seat(conn.name) or seat
-            if s is not None:
-                await self.apply(self.events.on_condition_summary(s, v, rx_ts))
+        elif t == "condition_summary":
+            s = student_seat(conn.name) or seat
+            if seat is not None and student_seat(conn.name) not in (None, seat):
+                slog.warning("%s 가 seat=%s 로 condition_summary 를 보냄 - 노드 이름의 좌석 %s 로 집계",
+                             conn.name, seat, s)
+            if s is None:
+                slog.warning("수신 실패 %s condition_summary - 좌석을 알 수 없어 버림", conn.name)
+                return
+            conn.summary_count += 1
+            conn.last_summary_ts, conn.last_summary = rx_ts, v
+            if conn.summary_stale:
+                conn.summary_stale = False
+                slog.info("%s condition_summary 다시 들어옴", conn.name)
+            slog.info("수신 OK %s condition_summary seat=%d focus_low=%s posture_bad=%s seq=%d (이번 연결 %d건째)",
+                      conn.name, s, v["focus_low"], v["posture_bad"], msg["seq"], conn.summary_count)
+            await self.apply(self.events.on_condition_summary(s, v, rx_ts))
         elif t == "pan_tilt_jog":                                       # [팬틸트] Console 프리셋 등록 (화살표)
             await self.apply(self.events.on_pan_tilt_jog(int(v["dpan"]), int(v["dtilt"]), rx_ts))
         elif t == "preset_save":                                        # [팬틸트] Console 프리셋 등록 (등록 버튼)
             await self.apply(self.events.on_preset_save(int(v["seat"]), rx_ts))
         # [팬틸트] pan_tilt_state 분기 삭제 — 팬틸트 상태는 TCP 가 아니라 on_pantilt_event 로 온다
+        else:
         else:
             log.debug("처리하지 않는 type: %s (%s)", t, conn.name)
 
@@ -308,6 +349,45 @@ class HubServer:
             for conn in list(self.nodes.values()):
                 if conn.online and now - conn.last_heartbeat > HEARTBEAT_TIMEOUT_S:
                     await self.set_offline(conn, "하트비트 끊김")
+            self.check_students(now)
+
+    # ---- 학생 수신 기록 (로그만, 판단 없음) ------------------------------
+    def check_students(self, now: float):
+        for node in STUDENT_NODES:
+            conn = self.nodes.get(node)
+            if not conn or not conn.online or conn.summary_stale:
+                continue
+            since = conn.last_summary_ts or conn.connected_ts
+            if now - since > STUDENT_SUMMARY_TIMEOUT_S:
+                conn.summary_stale = True
+                what = "마지막 수신 후" if conn.last_summary_ts else "접속 후 한 번도 없이"
+                slog.warning("%s 연결은 살아 있지만 condition_summary 가 %s %.0f초째 없음 "
+                             "(학생 프로그램의 판정·전송 확인)", node, what, now - since)
+        if now - self._last_report >= STUDENT_REPORT_INTERVAL_S:
+            self._last_report = now
+            self.log_student_report(now)
+
+    def log_student_report(self, now: float):
+        if not any(n in self.nodes for n in STUDENT_NODES):
+            return                         # 학생 노드가 한 번도 안 붙었으면 조용히
+        parts = []
+        for node in STUDENT_NODES:
+            seat, conn = student_seat(node), self.nodes.get(node)
+            if not conn:
+                parts.append(f"{seat}번 미접속")
+                continue
+            recent = conn.summary_count - self._report_counts.get(node, 0)
+            self._report_counts[node] = conn.summary_count
+            if not conn.online:
+                parts.append(f"{seat}번 끊김")
+            elif conn.last_summary_ts is None:
+                parts.append(f"{seat}번 접속, 데이터 없음")
+            else:
+                v = conn.last_summary or {}
+                state = "끊김의심" if conn.summary_stale else "OK"
+                parts.append(f"{seat}번 {state} 최근 {recent}건, 마지막 {now - conn.last_summary_ts:.0f}초 전 "
+                             f"(focus_low={v.get('focus_low')}, posture_bad={v.get('posture_bad')})")
+        slog.info("학생 수신 현황 | %s", " | ".join(parts))
 
     async def tick_loop(self):
         """0.1초마다 event_manager.tick (control 시계)."""
@@ -337,6 +417,24 @@ class HubServer:
             self.db.close()
 
 
+def setup_logging(level: int, log_file: str | None):
+    """화면 + 파일(5MB 넘으면 hub.log.1 ~ .5 로 밀어냄). 파일을 못 열면 화면에만 남긴다."""
+    logging.basicConfig(level=level, format=LOG_FORMAT)
+    if not log_file:
+        return
+    try:
+        from pathlib import Path
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=5,
+                                                  encoding="utf-8")
+    except OSError as e:
+        log.warning("로그 파일을 열 수 없음 (%s) - 화면에만 남김: %s", log_file, e)
+        return
+    fh.setFormatter(logging.Formatter(LOG_FORMAT))
+    logging.getLogger().addHandler(fh)
+    log.info("로그 파일: %s", log_file)
+
+
 def main():
     ap = argparse.ArgumentParser(description="control 서버 (TCP + 이벤트 관리 + DB)")
     ap.add_argument("--host", default="0.0.0.0",
@@ -344,6 +442,8 @@ def main():
     ap.add_argument("--port", type=int, default=None,
                     help="기본: config/common.yaml 의 control_port")
     ap.add_argument("--db", default=str(DB_PATH), help="기본: service/jarvis_control_service/db/hub.db")
+    ap.add_argument("--log-file", default=str(LOG_PATH),
+                    help="로그 파일 (기본: service/jarvis_control_service/logs/hub.log, 빈 문자열이면 화면에만)")
     ap.add_argument("-v", "--verbose", action="store_true", help="주고받은 메시지 전부 출력")
     ap.add_argument("--pantilt-port", default=None,                                    # [팬틸트]
                     help="Uno 시리얼 포트 (기본: control.yaml pantilt.port, 없으면 auto)")
@@ -351,8 +451,7 @@ def main():
     args = ap.parse_args()
     port = args.port or int(load_config().get("control_port", DEFAULT_PORT))
 
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    setup_logging(logging.DEBUG if args.verbose else logging.INFO, args.log_file)
     try:
         server = HubServer(args.host, port, args.db,
                            pantilt_port=args.pantilt_port, pantilt_sim=args.pantilt_sim)   # [팬틸트]

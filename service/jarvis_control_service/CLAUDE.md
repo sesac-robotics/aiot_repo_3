@@ -60,6 +60,13 @@ python3 -m tools.fake_node --server 127.0.0.1       # 통신 시나리오: 질�
 python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fall_alert 까지
 ```
 
+- 로그는 화면과 `logs/hub.log`(5MB × 5개 순환, git 제외)에 같이 남는다. `--log-file ""`이면 화면에만.
+- 학생 노드 수신 확인: `grep hub.student logs/hub.log`
+  - `수신 OK student_client_N condition_summary ...` / `수신 OK ... fall_confirm` — 받아서 처리함
+  - `수신 실패 ...` — 형식이 틀려 버림 (이유가 같이 찍힘)
+  - `전송 OK -> student_client_N fall_alert ...` — 학생에게 알림을 보냄
+  - `... condition_summary 가 30초째 없음` — 접속은 살아 있는데 판정 결과가 안 옴 (학생 프로그램 확인)
+  - `학생 수신 현황 | 1번 OK 최근 6건 ... | 2번 미접속 ...` — 1분마다 좌석별 요약
 - `SchemaMismatch` 오류가 나면 `db/hub.db`, `db/hub.db-wal`, `db/hub.db-shm`을 지우고 다시 실행한다. 스키마를 바꾸면 `db.py`의 `SCHEMA_VERSION`을 올린다.
 
 ## 코드 구조 (판단과 실행의 분리)
@@ -127,7 +134,7 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 | 바이트 | 필드 | 형식 | 내용 |
 | --- | --- | --- | --- |
 | 0-1 | magic | 2s | `0xAA 0x55` |
-| 2 | version | uint8 | 3 (v1 = 줄 단위 JSON 폐기. 2번은 student_client 시험 패킷이 써서 건너뜀) |
+| 2 | version | uint8 | 3 (v1 = 줄 단위 JSON 폐기. 2번은 폐기된 student_client 시험 패킷이 써서 건너뜀) |
 | 3 | node | uint8 | `NODE_CODES`: control 0 · vision 1 · camera 2 · console 3 · student 11~14 (DB `device.node`와 같음) |
 | 4 | type | uint8 | `TYPE_CODES`: 공통 0x0_ · 사건 0x1_ · vision 0x2_ · camera 0x3_ · console 0x4_ · student 0x5_ |
 | 5 | seat | uint8 | 1~4, 0 = 없음 |

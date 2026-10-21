@@ -120,6 +120,14 @@ class Validation(unittest.TestCase):
         with self.assertRaises(MessageError):
             parse_message(encode(msg(value={"state": "maybe"})))
 
+    def test_condition_summary_fields(self):
+        with self.assertRaises(MessageError):
+            parse_message(encode(msg(node="student_client_1", type_="condition_summary", seat=1,
+                                     value={"drowsy": True})))
+        ok = parse_message(encode(msg(node="student_client_1", type_="condition_summary", seat=1,
+                                      value={"focus_low": True, "posture_bad": False})))
+        self.assertEqual(ok["value"], {"focus_low": True, "posture_bad": False})
+
     def test_encode_rejects_unknown(self):
         with self.assertRaises(MessageError):
             encode(msg(node="nobody"))
