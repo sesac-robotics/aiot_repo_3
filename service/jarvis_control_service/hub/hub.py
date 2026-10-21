@@ -308,8 +308,6 @@ class HubServer:
                 await self.apply(self.events.on_fall_confirm(v["target_seat"], rx_ts, conn.name))
         elif t == "condition_summary":
             s = student_seat(conn.name) or seat
-        elif t == "condition_summary":
-            s = student_seat(conn.name) or seat
             if seat is not None and student_seat(conn.name) not in (None, seat):
                 slog.warning("%s 가 seat=%s 로 condition_summary 를 보냄 - 노드 이름의 좌석 %s 로 집계",
                              conn.name, seat, s)
@@ -329,7 +327,6 @@ class HubServer:
         elif t == "preset_save":                                        # [팬틸트] Console 프리셋 등록 (등록 버튼)
             await self.apply(self.events.on_preset_save(int(v["seat"]), rx_ts))
         # [팬틸트] pan_tilt_state 분기 삭제 — 팬틸트 상태는 TCP 가 아니라 on_pantilt_event 로 온다
-        else:
         else:
             log.debug("처리하지 않는 type: %s (%s)", t, conn.name)
 

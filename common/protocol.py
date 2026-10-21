@@ -81,6 +81,7 @@ INCIDENT_STATES = {"start", "end"}           # 사건 메시지의 value.state
 # ---- 메시지 종류 (5장) ----------------------------------------------------
 # vision_service <-> control
 VISION_TYPES = {"track_offset", "explain_text",          # ↑
+                "track_obs",                             # ↑ [팬틸트] track_offset 대체 {gen, frame_id, captured_at, status, cx, cy}
                 "track_target", "explain_request"}       # ↓
 # control <-> camera_controller
 CAMERA_TYPES = {"pan_tilt",                              # ↓
@@ -88,7 +89,9 @@ CAMERA_TYPES = {"pan_tilt",                              # ↓
 # control <-> instructor_console
 CONSOLE_TYPES = {"event_update", "queue_state", "device_update",
                  "class_condition", "snapshot",          # ↓
-                 "confirm", "resolve"}                   # ↑
+                 "preset_saved",                         # ↓ [팬틸트] {seat, pan, tilt}
+                 "confirm", "resolve",                   # ↑
+                 "pan_tilt_jog", "preset_save"}          # ↑ [팬틸트] 프리셋 등록 화살표 {dpan, dtilt} / 등록 버튼 {seat}
 # control <-> student_client_N
 STUDENT_TYPES = {"fall_alert", "fall_alert_cancel",      # ↓
                  "fall_confirm", "condition_summary"}    # ↑
@@ -99,11 +102,11 @@ VALID_TYPES = INCIDENT_TYPES | VISION_TYPES | CAMERA_TYPES | CONSOLE_TYPES \
     | STUDENT_TYPES | COMMON_TYPES
 
 # messages 표에 기록하지 않는 종류 (너무 많음, D9 / 5.1)
-NOT_LOGGED_TYPES = {"heartbeat", "track_offset"}
+NOT_LOGGED_TYPES = {"heartbeat", "track_offset", "track_obs"}
 
 # 끊긴 동안 NodeClient 가 모아 두었다가 재접속 후 보내는 종류
 # (사건 + 사람이 누른 버튼. 상태 메시지는 곧 새 값이 오므로 버린다)
-BUFFERED_TYPES = INCIDENT_TYPES | {"confirm", "resolve", "fall_confirm"}
+BUFFERED_TYPES = INCIDENT_TYPES | {"confirm", "resolve", "fall_confirm", "preset_save"}
 
 # 하트비트 (5.5)
 HEARTBEAT_INTERVAL_S = 2.0
@@ -125,11 +128,13 @@ TYPE_CODES = {
     "fall": 0x10, "question": 0x11, "away": 0x12,
     # vision 0x2_
     "track_offset": 0x20, "explain_text": 0x21, "track_target": 0x22, "explain_request": 0x23,
+    "track_obs": 0x24,
     # camera 0x3_
     "pan_tilt": 0x30, "pan_tilt_state": 0x31,
     # console 0x4_
     "event_update": 0x40, "queue_state": 0x41, "device_update": 0x42, "class_condition": 0x43,
     "snapshot": 0x44, "confirm": 0x45, "resolve": 0x46,
+    "pan_tilt_jog": 0x47, "preset_save": 0x48, "preset_saved": 0x49,
     # student 0x5_
     "fall_alert": 0x50, "fall_alert_cancel": 0x51, "fall_confirm": 0x52, "condition_summary": 0x53,
 }
@@ -402,6 +407,14 @@ def _check_value(type_: str, v: dict):
     elif type_ == "track_offset":
         if v.get("found"):
             need(_is_num(v.get("dx", 0.0)) and _is_num(v.get("dy", 0.0)), "dx, dy 는 숫자")
+    elif type_ == "track_obs":
+        need(_is_int(v.get("gen")), "gen 은 정수")
+        if v.get("status") == "TRACKED":
+            need(_is_num(v.get("cx")) and _is_num(v.get("cy")), "cx, cy 는 숫자")
+    elif type_ == "pan_tilt_jog":
+        need(_is_num(v.get("dpan")) and _is_num(v.get("dtilt")), "dpan, dtilt 는 숫자")
+    elif type_ == "preset_save":
+        need(v.get("seat") in VALID_SEATS and _is_int(v.get("seat")), "seat 은 좌석 번호")
     elif type_ == "condition_summary":
         # 필드 이름이 틀리면 반 집계에서 조용히 '정상'으로 세어지므로 받는 순간 버린다
         need(all(isinstance(v.get(k), bool) for k in ("focus_low", "posture_bad")),
