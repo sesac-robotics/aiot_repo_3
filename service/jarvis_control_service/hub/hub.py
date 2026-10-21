@@ -10,8 +10,11 @@ control(hub) TCP 서버 (상세 설계 0·5·6장)
   db.py 로 기록하고 해당 노드에 보낸다.
 - 0.1초마다 event_manager.tick(now) (control 시계)
 - 하트비트가 6초(3회) 안 오면 offline -> device_update
+- [팬틸트] 팬틸트는 TCP 노드가 아니라 같은 프로세스의 PanTiltService(hub/pantilt).
+  to="pantilt" 할 일은 메서드 호출로 실행하고, 팬틸트 알림(on_event)은 이벤트 루프로 넘겨 처리한다.
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m hub [--host 0.0.0.0] [--port 5000] [--db 경로] [-v]
+                                                 [--pantilt-port auto|/dev/ttyACM0] [--pantilt-sim]
 """
 
 import argparse
@@ -26,12 +29,13 @@ from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT
                              make_message, parse_message, student_seat)
 from hub.control_config import DB_PATH, ConfigError, load_control_config
 from hub.db import Database, SchemaMismatch
-from hub.event_manager import Effects, EventManager, HelpEvent
+from hub.event_manager import PANTILT, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT 추가
+from hub.pantilt import PanTiltService                                    # [팬틸트]
 
 log = logging.getLogger("hub")
 
 TICK_INTERVAL_S = 0.1
-QUIET_SEND_TYPES = {"pan_tilt", "track_target", "explain_request"}   # 미접속이어도 경고 안 함
+QUIET_SEND_TYPES = {"track_target", "explain_request"}   # 미접속이어도 경고 안 함 ([팬틸트] pan_tilt 는 TCP 로 안 보냄)
 
 
 @dataclass
@@ -47,7 +51,8 @@ class NodeConn:
 
 
 class HubServer:
-    def __init__(self, host: str, port: int, db_path, control_cfg: dict | None = None):
+    def __init__(self, host: str, port: int, db_path, control_cfg: dict | None = None,
+                 pantilt_port: str | None = None, pantilt_sim: bool = False):   # [팬틸트] 인자 2개 추가
         self.host, self.port = host, port
         self.db_path = db_path
         self.db = Database(db_path)
@@ -60,6 +65,11 @@ class HubServer:
         self.events = EventManager(cfg, self.db.max_event_id() + 1, open_events)
         self.nodes: dict[str, NodeConn] = {}
         self.seq = 0
+        # [팬틸트] 팬틸트 모듈은 run() 에서 이벤트 루프가 생긴 뒤 만든다 (on_event 를 루프로 넘기기 위해)
+        self.pantilt: PanTiltService | None = None                                        # [팬틸트]
+        self.pantilt_port = pantilt_port or cfg.get("pantilt", {}).get("port", "auto")   # [팬틸트] control.yaml pantilt.port
+        self.pantilt_sim = pantilt_sim                                                    # [팬틸트]
+        self.loop: asyncio.AbstractEventLoop | None = None                               # [팬틸트]
 
     # ---- 송신 ----------------------------------------------------------
     async def send(self, node: str, type_: str, value: dict, seat=None) -> bool:
@@ -89,7 +99,12 @@ class HubServer:
         except Exception:                  # 기록이 실패해도 화면·장비에는 보낸다 (쓰러짐을 놓치지 않게)
             log.exception("DB 기록 실패 - 전송은 계속")
         for s in fx.sends:
-            await self.send(s.to, s.type, s.value, s.seat)
+            if s.to == PANTILT:                                  # [팬틸트] TCP 대신 메서드 호출
+                self.call_pantilt(s.type, s.value)               # [팬틸트]
+            elif s.to == "db":                                   # [팬틸트] 팬틸트 프리셋 저장 → seat.has_preset
+                self.record_db(s.type, s.value)                  # [팬틸트]
+            else:
+                await self.send(s.to, s.type, s.value, s.seat)
 
     def record_sends(self, sends, now: float):
         """보내는 메시지 중 DB 에 남기는 것 (판단 없이 내용 그대로 기록)."""
@@ -98,12 +113,57 @@ class HubServer:
                 try:
                     self.db.set_device_online(s.value["node"], s.value["online"], now,
                                               s.value.get("note"))
-                except ValueError:         # device 표에 없는 노드 (템플릿 노드 등)
+                except ValueError:         # device 표에 없는 노드 (템플릿 노드·pantilt 등)
                     log.debug("device 표에 없는 노드: %s", s.value.get("node"))
             elif s.type == "class_condition":
                 self.db.insert_class_condition(now, s.value["focus_low_ratio"],
                                                s.value["posture_bad_ratio"],
                                                s.value.get("reporting", 0))
+
+    # ---- [팬틸트] 팬틸트 모듈 연결 --------------------------------------
+    def call_pantilt(self, type_: str, v: dict):                                  # [팬틸트] 추가
+        """event_manager 의 to="pantilt" 할 일을 PanTiltService 메서드로 바꿔 부른다 (바로 반환)."""
+        p = self.pantilt
+        if p is None:
+            log.debug("팬틸트 시작 전 - %s 무시", type_)
+            return
+        if type_ == "preset":
+            p.preset(v["gen"], v["seat"], v["kind"])
+        elif type_ == "home":
+            p.home(v["gen"])
+        elif type_ == "track":
+            p.track(v["gen"], v["cx"], v["cy"], v["captured_at"], v["frame_id"], v["found"])
+        elif type_ == "jog":
+            p.jog(v["dpan"], v["dtilt"])
+        elif type_ == "save":
+            p.save_preset(v["seat"])
+        elif type_ == "vision_online":
+            p.set_vision_online(v["online"])
+        else:
+            log.warning("모르는 팬틸트 명령: %s", type_)
+
+    def record_db(self, type_: str, v: dict):                                     # [팬틸트] 추가
+        if type_ == "seat_preset":
+            try:
+                self.db.set_has_preset(v["seat"], v["has_preset"])   # db.py 에 없으면 추가 필요 (아래 설명)
+            except Exception:
+                log.exception("seat.has_preset 기록 실패: %s", v)
+
+    def on_pantilt_event(self, event: str, fields: dict):                         # [팬틸트] 추가
+        """PanTiltService 의 on_event. 팬틸트 스레드에서 불리므로 이벤트 루프로 넘긴다."""
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self.handle_pantilt_event(event, fields)))
+
+    async def handle_pantilt_event(self, event: str, fields: dict):               # [팬틸트] 추가
+        now = time.time()
+        try:
+            if event == "pan_tilt_state":
+                await self.apply(self.events.on_pantilt_state(fields, now))
+            elif event == "preset_saved":
+                await self.apply(self.events.on_preset_saved(fields, now))
+        except Exception:
+            log.exception("팬틸트 이벤트 처리 오류: %s %s", event, fields)
 
     # ---- 연결 처리 -----------------------------------------------------
     async def handle_client(self, reader: asyncio.StreamReader,
@@ -190,8 +250,8 @@ class HubServer:
             await self.send(conn.name, "rx_ack", {"seq": msg["seq"]})
             await self.apply(self.events.on_incident(
                 t, seat, v["state"], rx_ts, source=f"{conn.name}:{msg['seq']}"))
-        elif t == "track_offset":
-            await self.apply(self.events.on_track_offset(seat, v, rx_ts))
+        elif t == "track_obs":                                          # [팬틸트] track_offset 대체
+            await self.apply(self.events.on_track_obs(v, rx_ts))       # [팬틸트] {gen, frame_id, captured_at, status, cx, cy}
         elif t == "explain_text":
             if "event_id" in v:
                 await self.apply(self.events.on_explain_text(
@@ -209,8 +269,11 @@ class HubServer:
             s = student_seat(conn.name) or seat
             if s is not None:
                 await self.apply(self.events.on_condition_summary(s, v, rx_ts))
-        elif t == "pan_tilt_state":
-            log.debug("팬틸트: %s", v)
+        elif t == "pan_tilt_jog":                                       # [팬틸트] Console 프리셋 등록 (화살표)
+            await self.apply(self.events.on_pan_tilt_jog(int(v["dpan"]), int(v["dtilt"]), rx_ts))
+        elif t == "preset_save":                                        # [팬틸트] Console 프리셋 등록 (등록 버튼)
+            await self.apply(self.events.on_preset_save(int(v["seat"]), rx_ts))
+        # [팬틸트] pan_tilt_state 분기 삭제 — 팬틸트 상태는 TCP 가 아니라 on_pantilt_event 로 온다
         else:
             log.debug("처리하지 않는 type: %s (%s)", t, conn.name)
 
@@ -241,6 +304,10 @@ class HubServer:
                 log.exception("tick 처리 중 오류")
 
     async def run(self):
+        self.loop = asyncio.get_running_loop()                                    # [팬틸트]
+        self.pantilt = PanTiltService(port=self.pantilt_port, simulate=self.pantilt_sim,
+                                      on_event=self.on_pantilt_event)             # [팬틸트] Uno 없어도 Control 은 계속
+        await self.apply(self.events.start(time.time()))                          # [팬틸트] 복구된 사건 좌석으로
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         log.info("control 서버 시작: %s:%d (DB: %s)", self.host, self.port, self.db_path)
         tasks = [asyncio.create_task(self.heartbeat_watchdog()),
@@ -251,6 +318,7 @@ class HubServer:
         finally:
             for t in tasks:
                 t.cancel()
+            self.pantilt.close()                                                  # [팬틸트] 정지 + LED 끔
             self.db.close()
 
 
@@ -262,13 +330,17 @@ def main():
                     help="기본: config/common.yaml 의 control_port")
     ap.add_argument("--db", default=str(DB_PATH), help="기본: service/jarvis_control_service/db/hub.db")
     ap.add_argument("-v", "--verbose", action="store_true", help="주고받은 메시지 전부 출력")
+    ap.add_argument("--pantilt-port", default=None,                                    # [팬틸트]
+                    help="Uno 시리얼 포트 (기본: control.yaml pantilt.port, 없으면 auto)")
+    ap.add_argument("--pantilt-sim", action="store_true", help="Uno 없이 모의 팬틸트")  # [팬틸트]
     args = ap.parse_args()
     port = args.port or int(load_config().get("control_port", DEFAULT_PORT))
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
-        server = HubServer(args.host, port, args.db)
+        server = HubServer(args.host, port, args.db,
+                           pantilt_port=args.pantilt_port, pantilt_sim=args.pantilt_sim)   # [팬틸트]
     except (SchemaMismatch, ConfigError) as e:
         log.error("%s", e)
         raise SystemExit(1)

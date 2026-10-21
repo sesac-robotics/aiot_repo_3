@@ -5,6 +5,8 @@
 - 네트워크도 DB 도 모른다. 입력을 받으면 "할 일"(Effects)을 돌려주고,
   hub 가 그것을 실제로 보내고(send) db.py 로 기록한다.
 - 시계는 항상 인자로 받는다(now = control 시계 rx_ts). 가짜 시계로 테스트할 수 있다.
+- [팬틸트] 팬틸트는 Control 내부 모듈(hub/pantilt)이다. to="pantilt" 인 Send 는
+  hub 가 PanTiltService 메서드 호출로 바꿔 실행한다 (TCP 로 보내지 않음).
 
 상태: active(추적 중) / waiting(대기열) / closed(종료) 세 가지뿐.
 confirm 은 상태가 아니다. confirmed_at 을 기록하고 단계 알림만 멈춘다.
@@ -14,12 +16,16 @@ confirm 은 상태가 아니다. confirmed_at 을 기록하고 단계 알림만 
 import logging
 from dataclasses import asdict, dataclass, field
 
-from common.protocol import (CAMERA_NODE, CONSOLE_NODE, STUDENT_NODES, VISION_NODE,
+from common.protocol import (CONSOLE_NODE, STUDENT_NODES, VISION_NODE,   # [팬틸트] CAMERA_NODE 제거
                              student_node)
 
 log = logging.getLogger("event_manager")
 
 SYSTEM = "system"
+
+PANTILT = "pantilt"                                  # [팬틸트] hub 가 PanTiltService 호출로 바꾸는 목적지
+KIND_CODE = {"fall": 1, "question": 2, "away": 3}    # [팬틸트] 팬틸트·LED 는 숫자 코드 (1 빨강·2 파랑·3 초록)
+PANTILT_SAFE = 7                                     # [팬틸트] pan_tilt_state.state 7 = SAFE (Uno 통신 오류)
 
 # help_event 표에 저장하는 값 (문자열 그대로. 숫자 코드로 바꾸는 일은 db.py 가 한다)
 # reg_id·gen 은 db.py 가 채운다. source 는 DB 에 없다 (event_log detect 의 detail 에만).
@@ -96,26 +102,30 @@ class EventManager:
         self.question_expire_s = float(t["question_expire_s"])
         self.away_alert_s = float(t["away_alert_s"])
         self.class_condition_s = float(t.get("class_condition_s", 10))
-        self.nudge_min_interval = 1.0 / float(cfg["track"]["nudge_max_hz"])
-        self.nudge_gain = float(cfg["track"]["nudge_gain"])
+        # [팬틸트] nudge_min_interval, nudge_gain 삭제 — P 제어(보정량 계산)는 팬틸트 모듈이 한다
 
         self.next_id = next_event_id
         self.events: dict[int, HelpEvent] = {}           # 열린 이벤트만
         self.active_id: int | None = None
         self.devices: dict[str, dict] = {}               # node -> {online, note}
         self.conditions: dict[int, tuple[dict, float]] = {}   # seat -> (condition_summary, rx_ts)
-        self._last_nudge = 0.0
         self._last_class_sent: float | None = None
         self._last_queue: tuple | None = None
-        self._target_seat: int | None = None             # 마지막으로 track_target 보낸 좌석
+        self.gen = 0                                     # [팬틸트] 추적 대상(active 사건)이 바뀔 때마다 +1
+        self._target_id: int | None = None               # [팬틸트] 마지막으로 팬틸트에 보낸 active 사건 (좌석 대신)
+        self.pan_tilt: dict = {}                         # [팬틸트] 마지막 pan_tilt_state {state, pan, tilt, gen, error}
         self._fx = Effects()
 
         for ev in open_events:
             self.events[ev.event_id] = ev
             if ev.status == "active":
-                self.active_id = ev.event_id
-                self._target_seat = ev.seat
+                self.active_id = ev.event_id             # [팬틸트] _target 은 비워 둠 → start() 에서 팬틸트에 다시 보냄
             self.next_id = max(self.next_id, ev.event_id + 1)
+
+    def start(self, now: float) -> Effects:              # [팬틸트] 추가
+        """hub 가 시작 직후 한 번 호출. 복구된 active 사건 좌석으로 팬틸트·Vision 을 맞춘다."""
+        self._reschedule(now)
+        return self._flush()
 
     # =====================================================================
     # 입력
@@ -203,18 +213,16 @@ class EventManager:
         self._update(ev)
         return self._flush()
 
-    def on_track_offset(self, seat: int | None, value: dict, now: float) -> Effects:
-        """지금 active 인 좌석의 결과일 때만 pan_tilt nudge 로 바꿔 보낸다 (최대 nudge_max_hz)."""
-        ev = self.active
-        if ev is None or seat != ev.seat or not value.get("found"):
+    def on_track_obs(self, value: dict, now: float) -> Effects:   # [팬틸트] on_track_offset(nudge) 대체
+        """Vision track_obs {gen, frame_id, captured_at, status, cx, cy} 를 팬틸트로 넘긴다.
+        보정량 계산(P 제어)은 팬틸트가 한다. 지난 gen 의 좌표는 버린다."""
+        if self.active is None or value.get("gen") != self.gen:
             return self._flush()
-        if now - self._last_nudge < self.nudge_min_interval:
-            return self._flush()
-        self._last_nudge = now
-        dx, dy = float(value.get("dx", 0.0)), float(value.get("dy", 0.0))
-        self._send(CAMERA_NODE, "pan_tilt", {"mode": "nudge",
-                                             "dpan": round(dx * self.nudge_gain, 2),
-                                             "dtilt": round(dy * self.nudge_gain, 2)})
+        self._send(PANTILT, "track", {
+            "gen": self.gen, "cx": value["cx"], "cy": value["cy"],
+            "captured_at": value["captured_at"],          # cam2 촬영 시각 — 바꾸지 않고 그대로
+            "frame_id": value["frame_id"],
+            "found": value.get("status") == "TRACKED"})
         return self._flush()
 
     def on_condition_summary(self, seat: int, value: dict, now: float) -> Effects:
@@ -230,19 +238,43 @@ class EventManager:
         if not online:
             if node == VISION_NODE:
                 note = "감지 중단"
-            elif node == CAMERA_NODE:
-                note = "추적 중단 (알림은 계속)"
-            else:
+            else:                               # [팬틸트] CAMERA_NODE 분기 삭제 (팬틸트는 on_pantilt_state)
                 note = "연결 끊김"
         self.devices[node] = {"node": node, "online": online, "note": note}
         self._send(CONSOLE_NODE, "device_update", dict(self.devices[node]))
-        if online:                              # 다시 붙은 노드에 지금 추적 대상을 알려 준다
-            ev = self.active
-            if node == VISION_NODE:
-                self._send(VISION_NODE, "track_target", {"seat": ev.seat if ev else None})
-            elif node == CAMERA_NODE:
-                self._send(CAMERA_NODE, "pan_tilt",
-                           {"mode": "preset", "seat": ev.seat} if ev else {"mode": "home"})
+        if node == VISION_NODE:                                          # [팬틸트]
+            self._send(PANTILT, "vision_online", {"online": online})    # [팬틸트] 끊기면 추적 멈추고 그 자리 유지
+            if online:                          # 다시 붙은 Vision 에 지금 추적 대상을 알려 준다
+                ev = self.active
+                self._send(VISION_NODE, "track_target",
+                           {"seat": ev.seat if ev else None, "gen": self.gen})   # [팬틸트] gen 추가
+        return self._flush()
+
+    # ---- [팬틸트] 팬틸트 → Control (hub 가 on_event 를 Control 루프로 넘겨 호출) ----
+    def on_pantilt_state(self, fields: dict, now: float) -> Effects:   # [팬틸트] 추가
+        """pan_tilt_state {state, pan, tilt, gen, error}. SAFE 면 Console 장비 상태에 '추적 중단'."""
+        self.pan_tilt = fields
+        online = fields["state"] != PANTILT_SAFE
+        prev = self.devices.get(PANTILT)
+        if prev is None or prev["online"] != online:
+            self.devices[PANTILT] = {"node": PANTILT, "online": online,
+                                     "note": "" if online else "추적 중단 (알림은 계속)"}
+            self._send(CONSOLE_NODE, "device_update", dict(self.devices[PANTILT]))
+        return self._flush()
+
+    def on_preset_saved(self, fields: dict, now: float) -> Effects:    # [팬틸트] 추가
+        """preset_saved {seat, pan, tilt}. 저장 직후와 시작 직후(저장된 좌석마다) 온다."""
+        self._send("db", "seat_preset", {"seat": fields["seat"], "has_preset": 1})   # hub 가 seat.has_preset 갱신
+        self._send(CONSOLE_NODE, "preset_saved", dict(fields))
+        return self._flush()
+
+    # ---- [팬틸트] Console 프리셋 등록 → 팬틸트 ----
+    def on_pan_tilt_jog(self, dpan: int, dtilt: int, now: float) -> Effects:   # [팬틸트] 추가
+        self._send(PANTILT, "jog", {"dpan": dpan, "dtilt": dtilt})   # IDLE·HOLD_SEAT 에서만 동작
+        return self._flush()
+
+    def on_preset_save(self, seat: int, now: float) -> Effects:      # [팬틸트] 추가
+        self._send(PANTILT, "save", {"seat": seat})                   # 끝나면 on_preset_saved 로 돌아옴
         return self._flush()
 
     def snapshot(self) -> dict:
@@ -325,13 +357,19 @@ class EventManager:
                 self._update(head)
             else:
                 self.active_id = None
-        # 추적 대상(좌석)이 바뀌었으면 Vision 과 팬틸트에 알린다
-        seat = head.seat if head is not None else None
-        if seat != self._target_seat:
-            self._target_seat = seat
-            self._send(VISION_NODE, "track_target", {"seat": seat})
-            self._send(CAMERA_NODE, "pan_tilt",
-                       {"mode": "preset", "seat": seat} if seat is not None else {"mode": "home"})
+        # [팬틸트] 추적 대상(active 사건)이 바뀌었으면 gen+1 후 팬틸트와 Vision 에 알린다.
+        # 좌석이 아니라 사건으로 비교한다: 같은 좌석에서 질문 → 쓰러짐으로 바뀌어도 LED·gen 이 바뀌어야 함
+        target_id = head.event_id if head is not None else None              # [팬틸트]
+        if target_id != self._target_id:                                     # [팬틸트]
+            self._target_id = target_id                                      # [팬틸트]
+            self.gen += 1                                                    # [팬틸트]
+            if head is not None:                                             # [팬틸트]
+                self._send(PANTILT, "preset", {"gen": self.gen, "seat": head.seat,
+                                               "kind": KIND_CODE[head.kind]})   # [팬틸트] 좌석 이동 + LED
+                self._send(VISION_NODE, "track_target", {"seat": head.seat, "gen": self.gen})   # [팬틸트] gen 추가
+            else:                                                            # [팬틸트]
+                self._send(PANTILT, "home", {"gen": self.gen})               # [팬틸트] HOME, LED 끔
+                self._send(VISION_NODE, "track_target", {"seat": None, "gen": self.gen})        # [팬틸트]
         q = self._queue_value()
         key = (q["active"], tuple(q["waiting"]))
         if key != self._last_queue:
