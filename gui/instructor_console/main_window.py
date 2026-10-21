@@ -7,7 +7,6 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMainWindow,
                              QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
-from common import protocol as P
 from gui.alert_sound import AlertSound      # 쓰러짐 알림음 (학생 화면과 공용)
 
 from .facility import FacilityPage, LivePage, SettingsDialog
@@ -26,9 +25,8 @@ class MainWindow(QMainWindow):
         self.link = ControlLink(host, port, self)
         self.link.message.connect(self.store.apply)
         self.link.connected_changed.connect(self.on_connection)
-        self.link.rtt_changed.connect(lambda ms: self.rtt.setText(f"{ms:.0f}ms"))
         send = self.send
-        self.logs = LogQueries(send, self.store, self)
+        self.logs = LogQueries(self.store, self)
         self.alarm = AlertSound(self)
 
         # ── 세로 탭 ──
@@ -53,14 +51,12 @@ class MainWindow(QMainWindow):
             self.tabs[key] = b
         sv.addStretch(1)
         self.conn = QLabel(alignment=Qt.AlignmentFlag.AlignCenter, wordWrap=True)
-        self.rtt = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
-        self.rtt.setStyleSheet("color:#90a4ae; font-size:11px;")
         self.clock = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         self.clock.setStyleSheet("color:#fff; font-size:15px; font-weight:600;")
         settings = QToolButton(text="⚙ 설정")
         settings.setMinimumHeight(40)
         settings.clicked.connect(self.open_settings)
-        for w in (self.clock, self.conn, self.rtt, settings):
+        for w in (self.clock, self.conn, settings):
             sv.addWidget(w)
 
         # ── 페이지 ──
@@ -107,8 +103,9 @@ class MainWindow(QMainWindow):
         self.link.start()
 
     # ── 연결 ──
-    def send(self, msg_type: int, body: dict | None = None) -> bool:
-        """모든 버튼이 이걸로 보낸다. 끊겨서 못 보냈으면 강사가 알 수 있게 아래에 알린다."""
+    def send(self, msg_type: str, body: dict | None = None) -> bool:
+        """모든 버튼이 이걸로 보낸다 (msg_type = protocol.py 의 메시지 이름).
+        끊겨서 못 보냈으면 강사가 알 수 있게 아래에 알린다."""
         if self.link.send(msg_type, body):
             return True
         self.statusBar().showMessage("Control 서버에 연결되지 않아 보내지 못했습니다 — 연결되면 다시 눌러 주세요", 5000)
@@ -119,7 +116,6 @@ class MainWindow(QMainWindow):
         self.conn.setText("● 연결됨" if ok else "● 끊김")
         self.conn.setStyleSheet(f"color:{'#81c995' if ok else '#f28b82'}; font-size:12px;")
         if not ok:
-            self.rtt.setText("")
             self.logs.reset()
 
     def on_snapshot(self):
@@ -133,7 +129,7 @@ class MainWindow(QMainWindow):
         if self.store.in_snapshot:
             return
         ev = self.store.events[event_id]
-        if is_new and ev["kind"] == P.KIND_FALL and self.store.alert_sound_on():
+        if is_new and ev["kind"] == "fall" and self.store.alert_sound_on():
             self.alarm.play()
             QApplication.alert(self, 3000)
         self.update_badge()
@@ -159,7 +155,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("확인 안 한 이벤트가 없습니다", 3000)
 
     def open_settings(self):
-        SettingsDialog(self.store, self.send, self).exec()
+        SettingsDialog(self.store, self).exec()
 
     def tick(self):
         self.clock.setText(time.strftime("%H:%M:%S"))

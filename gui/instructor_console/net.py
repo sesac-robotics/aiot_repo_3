@@ -1,36 +1,38 @@
-"""IF-05 Control ↔ Instructor Console (TCP 바이너리)
+"""Control ↔ Instructor Console (TCP 바이너리 프레임, common/protocol.py)
 
 QTcpSocket을 메인 스레드 이벤트 루프에서 쓴다. 스레드를 따로 두지 않아도
 readyRead 시그널로 받기 때문에 화면이 멈추지 않는다.
-- 접속 직후 node_info, 2초마다 heartbeat
-- 끊기면 2초마다 다시 접속 (4.1)
-- 6초 동안 Control에서 아무것도 안 오면 끊긴 것으로 보고 다시 접속
+- 접속 직후 heartbeat(노드 등록) + node_info, 2초마다 heartbeat
+- 끊기면 2초마다 다시 접속
+- 주고받는 값은 protocol.make_message() 의 dict 그대로 (type·node 는 문자열)
+- Control 은 Console 에 주기적으로 보내는 메시지가 없으므로, 받은 게 없다고 끊지 않는다.
+  끊김은 TCP 연결 종료로만 판단한다.
 """
 from __future__ import annotations
 
-import time
+import os
+import platform
+import socket
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
 
 from common import protocol as P
 
-CONSOLE_VERSION = "console-0.1"
+CONSOLE_VERSION = "console-0.2"
 
 
 class ControlLink(QObject):
-    message = pyqtSignal(str, dict)        # (type 이름, 본문)
+    message = pyqtSignal(str, dict)        # (type 이름, value)
     connected_changed = pyqtSignal(bool)
-    rtt_changed = pyqtSignal(float)        # ms
 
     def __init__(self, host: str, port: int, parent=None):
         super().__init__(parent)
         self.host, self.port = host, port
         self.sock = QTcpSocket(self)
         self.reader = P.FrameReader()
-        self.seq = P.SeqCounter()
+        self.seq = 0
         self.connected = False
-        self.last_rx = 0.0
 
         self.sock.connected.connect(self._on_connected)
         self.sock.disconnected.connect(self._on_disconnected)
@@ -39,7 +41,7 @@ class ControlLink(QObject):
 
         self.reconnect_timer = QTimer(self, singleShot=True, interval=2000)
         self.reconnect_timer.timeout.connect(self.start)
-        self.hb_timer = QTimer(self, interval=2000)
+        self.hb_timer = QTimer(self, interval=int(P.HEARTBEAT_INTERVAL_S * 1000))
         self.hb_timer.timeout.connect(self._heartbeat)
 
     # ── 연결 ────────────────────────────────────────
@@ -50,10 +52,10 @@ class ControlLink(QObject):
 
     def _on_connected(self):
         self.connected = True
-        self.last_rx = time.time()
-        self.send(P.NODE_INFO, {"seat": 0, "version": CONSOLE_VERSION})
+        self._heartbeat()                        # 첫 메시지로 노드 등록 → Control 이 snapshot 을 보낸다
+        self.send("node_info", {"version": CONSOLE_VERSION, "pc": self._pc_info()})
         self.hb_timer.start()
-        self.connected_changed.emit(True)       # 이어서 Control이 snapshot을 보낸다
+        self.connected_changed.emit(True)
 
     def _on_disconnected(self):
         self.hb_timer.stop()
@@ -67,26 +69,30 @@ class ControlLink(QObject):
         if self.sock.state() == QAbstractSocket.SocketState.UnconnectedState:
             self._on_disconnected()
 
+    def _pc_info(self) -> dict:
+        return {"hostname": socket.gethostname(), "ip": self.sock.localAddress().toString(),
+                "os": f"{platform.system()} {platform.release()}",
+                "python": platform.python_version(), "pid": os.getpid()}
+
     # ── 송수신 ──────────────────────────────────────
-    def send(self, msg_type: int, body: dict | None = None) -> bool:
+    def send(self, type_: str, value: dict | None = None, seat: int | None = None) -> bool:
         if not self.connected:
             return False
-        self.sock.write(P.encode(msg_type, P.NODE_CONSOLE, self.seq.next(), body))
+        self.seq += 1
+        msg = P.make_message(P.CONSOLE_NODE, self.seq, type_, seat, value)
+        self.sock.write(P.encode(msg))
         return True
 
     def _heartbeat(self):
-        if time.time() - self.last_rx > 6.0:     # Control 무응답 → 끊고 다시 접속
-            self.sock.abort()
-            self._on_disconnected()
-            return
-        self.send(P.HEARTBEAT)                   # Console heartbeat는 본문 없음
+        self.send("heartbeat")
 
     def _on_ready_read(self):
-        self.last_rx = time.time()
-        for header, name, body in self.reader.feed(bytes(self.sock.readAll().data())):
-            if name is None:                     # 모르는 msg_type은 건너뛴다
+        for frame in self.reader.feed(bytes(self.sock.readAll().data())):
+            try:
+                msg = P.parse_message(frame)
+            except P.MessageError as e:          # 깨진 메시지는 건너뛴다 (연결은 유지)
+                print(f"[console] Control 메시지 오류: {e}")
                 continue
-            if name == "heartbeat_ack":
-                self.rtt_changed.emit((time.time() - body["echo_ts"]) * 1000.0)
+            if msg["type"] == "rx_ack":
                 continue
-            self.message.emit(name, body)
+            self.message.emit(msg["type"], msg["value"])

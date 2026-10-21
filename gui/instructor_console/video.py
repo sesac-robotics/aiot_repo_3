@@ -16,8 +16,6 @@ from PyQt6.QtGui import QDesktopServices, QImage, QPixmap
 from PyQt6.QtNetwork import QHostAddress, QUdpSocket
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedLayout, QVBoxLayout, QWidget
 
-from common import protocol as P
-
 UDP_HEADER = struct.Struct(">B3xId")     # cam_id, 예약 3바이트, frame_id, captured_at (16바이트)
 
 try:                                       # QtMultimedia가 없는 환경에서도 화면은 뜨게
@@ -133,14 +131,15 @@ class ClipPlayer(QWidget):
         self.request_clip.emit(event_id)
 
     def on_clip_info(self, m: dict):
+        """m = {event_id, status: none | recording | saved | deleted, path}"""
         if m["event_id"] != self.event_id:
             return
         st = m["status"]
-        if st == P.CLIP_NONE:
-            return self._show_msg("이 이벤트는 녹화가 없습니다")
-        if st == P.CLIP_DELETED:
+        if st == "none":
+            return self._show_msg("이 이벤트는 녹화가 없습니다\n(녹화 기능은 아직 Control 에 없습니다)")
+        if st == "deleted":
             return self._show_msg("보관 기간이 지나 녹화가 삭제되었습니다")
-        if st == P.CLIP_RECORDING:
+        if st == "recording":
             return self._show_msg("아직 녹화 중입니다 — 이벤트가 끝나면 다시 볼 수 있습니다")
         path = m["path"]
         self.path = path if os.path.isabs(path) else os.path.join(self.clip_root, path)
