@@ -1,79 +1,99 @@
-"""Control 연결: 팀 공용 NodeClient를 Qt 시그널로 감싼다 (통신 형식은 common/에만 있음)
+"""학생 노드 ↔ control(hub) 연결: common/node_client.NodeClient 위의 얇은 껍데기 (바이너리 프레임 v3, 포트 5000)
 
-- 받음: fall_alert {target_seat, stage}, fall_alert_cancel {target_seat}
-- 보냄: fall_confirm {target_seat}, condition_summary (10초마다): 묶음 focus_low·posture_bad +
-  개별 drowsy·yawn·not_forward·forward_lean·head_tilt·shoulder_tilt (값은 monitor/condition.py to_summary)
-- event_id: Control이 fall_alert에 event_id를 실어 보내면 fall_confirm에 그대로 돌려준다 (지금 hub는 안 보냄).
-  끊긴 동안 쌓였다 늦게 간 확인이 같은 자리의 '새' 쓰러짐을 확인하지 않게 Control이 가려낼 수 있도록.
-- 자리 등록(seat_register)은 Interface Spec v1.1에 정의됐지만 아직 common/protocol.py에 없다.
-  protocol.py에 추가되면 자동으로 보내고, 그 전에는 학생 노트북에만 저장한다.
-- 하트비트에 노트북 카메라 상태(cam_ok)를 같이 싣는다 (강사 화면 학생 정보 창).
+seat_link_main(웹캠 판정)과 run_client(카메라 없는 시험 노드)가 같이 쓴다.
+- 노드 이름: student_client_<좌석>, 좌석은 1~4 (common/protocol.py VALID_SEATS)
+- control IP·포트: 저장소 최상위 config/common.yaml (명령줄 --server/--port 가 있으면 그게 우선)
+- 보내는 것: condition_summary 묶음 {"focus_low", "posture_bad"} + 개별 {"drowsy", "yawn", "not_forward",
+             "forward_lean", "head_tilt", "shoulder_tilt"} (모두 bool, 값은 monitor/condition.py to_summary)
+             fall_confirm {"target_seat": N}                            (학생이 쓰러짐 알림 확인)
+- 받는 것  : fall_alert {"target_seat", "stage"}, fall_alert_cancel {"target_seat"}
+
+같은 좌석 번호로 두 프로그램을 동시에 띄우면 control 이 먼저 붙은 연결을 끊는다 (좌석당 하나만 실행).
 """
 import logging
+import sys
+import threading
+from pathlib import Path
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+# common/ 은 저장소 최상위(aiot_repo_3/)에 있다
+_REPO_ROOT = str(Path(__file__).resolve().parents[3])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-from common.node_client import NodeClient
-from common.protocol import VALID_TYPES, student_node
+from common.config import load_config                    # noqa: E402
+from common.node_client import NodeClient                # noqa: E402
+from common.protocol import VALID_SEATS, student_node    # noqa: E402
 
-log = logging.getLogger("student_gui")
-CAN_REGISTER = "seat_register" in VALID_TYPES
+log = logging.getLogger("control_link")
 
 
-class ControlLink(QObject):
-    fall_alert = pyqtSignal(int, str, int)      # target_seat, stage ("neighbor" / "all"), event_id (없으면 0)
-    fall_cancel = pyqtSignal(int, int)          # target_seat, event_id (없으면 0)
-    connection_changed = pyqtSignal(bool)
-
-    def __init__(self, seat: int, host: str, port: int):
-        super().__init__()
+class StudentLink:
+    def __init__(self, seat: int, server=None, port=None, on_alert=None):
+        """on_alert(alert_seat_or_None, stage_or_None): 쓰러짐 알림이 뜨거나 내려갈 때 (수신 스레드에서 불림)"""
+        if seat not in VALID_SEATS:
+            raise ValueError(f"좌석은 {VALID_SEATS} 중 하나여야 합니다: {seat}")
+        cfg = load_config(control_host=server, control_port=port)
         self.seat = seat
-        self.client = NodeClient(student_node(seat), host, port, on_message=self._on_message)
-        self.client.set_info({"seat": seat, "role": "student_gui"})
-        self._connected = False
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._check)
-        self._timer.start(1000)
+        self.node = student_node(seat)
+        self.host, self.port = cfg["control_host"], int(cfg["control_port"])
+        self.on_alert = on_alert
+        self._lock = threading.Lock()
+        self.alert_seat = None          # 지금 떠 있는 쓰러짐 알림의 좌석
+        self.alert_stage = None
+        self.sent = 0                   # 보낸 condition_summary 수
+        self.dropped = 0                # 끊겨서 못 보낸 수 (상태 요약이라 다시 보내지 않음)
+        self.client = NodeClient(self.node, self.host, self.port, on_message=self._on_message)
 
+    # ---- 수명 ---------------------------------------------------------
     def start(self):
         self.client.start()
+        log.info("%s: control %s:%d 에 접속 중", self.node, self.host, self.port)
 
     def stop(self):
         self.client.stop()
 
-    def _check(self):
-        now = self.client.connected
-        if now != self._connected:
-            self._connected = now
-            self.connection_changed.emit(now)
+    @property
+    def connected(self) -> bool:
+        return self.client.connected
 
-    def _on_message(self, msg: dict):
-        """NodeClient 수신 스레드에서 불림 → 시그널로 GUI 스레드에 넘김 (Qt가 알아서 큐에 넣음)"""
-        t, v = msg["type"], msg["value"]
-        if t == "fall_alert":
-            self.fall_alert.emit(int(v["target_seat"]), str(v.get("stage", "neighbor")),
-                                 int(v.get("event_id") or 0))
-        elif t == "fall_alert_cancel":
-            self.fall_cancel.emit(int(v["target_seat"]), int(v.get("event_id") or 0))
-
-    # ---- 보내기 ---------------------------------------------------------
-    def set_camera(self, cam_ok: bool, fps: float):
-        self.client.set_status(cam_ok=int(cam_ok))
+    def set_fps(self, fps: float):
         self.client.set_fps(fps)
 
-    def send_fall_confirm(self, target_seat: int, event_id: int = 0):
-        value = {"target_seat": target_seat}
-        if event_id:                            # Control이 준 경우에만 (지금 hub는 없는 키를 무시함)
-            value["event_id"] = event_id
-        self.client.send("fall_confirm", seat=self.seat, value=value)
+    # ---- 보내기 -------------------------------------------------------
+    def send_summary(self, summary: dict) -> bool:
+        """summary: monitor/condition.py to_summary() 결과 (묶음 2개 + 개별 6개)"""
+        ok = self.client.send("condition_summary", seat=self.seat,
+                              value={k: bool(v) for k, v in summary.items()})
+        if ok:
+            self.sent += 1
+        else:
+            self.dropped += 1
+        return ok
 
-    def send_summary(self, summary: dict):
-        self.client.send("condition_summary", seat=self.seat, value=summary)
-
-    def send_register(self, name: str, baseline: dict, zones: dict | None) -> bool:
-        """자리 등록을 Control(중앙 DB)에 보낸다. 아직 protocol.py에 없으면 False"""
-        if not CAN_REGISTER:
-            log.info("seat_register 미지원 (protocol.py) → 학생 노트북에만 저장")
+    def confirm_fall(self) -> bool:
+        """떠 있는 쓰러짐 알림을 확인했다고 보낸다. 알림이 없으면 아무것도 안 함."""
+        with self._lock:
+            target = self.alert_seat
+        if target is None:
             return False
-        return self.client.send("seat_register", seat=self.seat,
-                                value={"student_name": name, "baseline": baseline, "zones": zones or {}})
+        self.client.send("fall_confirm", seat=self.seat, value={"target_seat": target})
+        log.info("쓰러짐 확인 보냄: %d번 좌석", target)
+        return True
+
+    # ---- 받기 ---------------------------------------------------------
+    def _on_message(self, msg: dict):
+        t, v = msg["type"], msg["value"]
+        if t == "fall_alert":
+            with self._lock:
+                self.alert_seat, self.alert_stage = v.get("target_seat"), v.get("stage")
+            log.info("쓰러짐 알림: %s번 좌석 (%s)", self.alert_seat, self.alert_stage)
+        elif t == "fall_alert_cancel":
+            with self._lock:
+                if v.get("target_seat") != self.alert_seat:
+                    return
+                self.alert_seat = self.alert_stage = None
+            log.info("쓰러짐 알림 해제: %s번 좌석", v.get("target_seat"))
+        else:
+            return
+        if self.on_alert:
+            self.on_alert(self.alert_seat, self.alert_stage)
