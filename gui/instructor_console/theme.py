@@ -1,36 +1,45 @@
-"""화면 구성도 v3의 색·라벨 (화면 표시용 이름은 여기 한 곳에만)"""
+"""화면 구성도 v3의 색·라벨 (화면 표시용 이름은 여기 한 곳에만)
+
+값은 hub(event_manager)가 보내는 문자열 그대로 쓴다 (common/protocol.py 기준).
+kind: fall | question | away, status: active | waiting | closed …
+"""
 from __future__ import annotations
 
 import time
 
 from common import protocol as P
 
+KINDS = ("fall", "question", "away")          # 우선순위 순 (P.INCIDENT_PRIORITY)
+NO_KIND = "none"                              # 이벤트 없는 평상시 (화면 표시용)
+
 # 색 = 우선순위 (빨강 쓰러짐 > 파랑 질문 > 노랑 자리비움 > 흐린 회색 평상시)
-KIND_COLOR = {P.KIND_FALL: "#d93025", P.KIND_QUESTION: "#1a73e8", P.KIND_AWAY: "#f9ab00", P.KIND_NONE: "#c4c8cc"}
-KIND_BG = {P.KIND_FALL: "#fdecea", P.KIND_QUESTION: "#e8f0fe", P.KIND_AWAY: "#fef7e0", P.KIND_NONE: "#fafbfc"}
-KIND_NAME = {P.KIND_FALL: "쓰러짐", P.KIND_QUESTION: "질문", P.KIND_AWAY: "자리비움", P.KIND_NONE: "일반"}
+KIND_COLOR = {"fall": "#d93025", "question": "#1a73e8", "away": "#f9ab00", NO_KIND: "#c4c8cc"}
+KIND_BG = {"fall": "#fdecea", "question": "#e8f0fe", "away": "#fef7e0", NO_KIND: "#fafbfc"}
+KIND_NAME = {"fall": "쓰러짐", "question": "질문", "away": "자리비움", NO_KIND: "일반"}
 OFFLINE_ORANGE = "#fbe3cf"
 
-STATUS_NAME = {P.ST_ACTIVE: "대응 중", P.ST_WAITING: "대기", P.ST_CLOSED: "종료"}
-CLOSE_NAME = {P.CLOSE_NONE: "", P.CLOSE_RESOLVED: "완료", P.CLOSE_FALSE_ALARM: "오감지",
-              P.CLOSE_EXPIRED: "만료", P.CLOSE_CLEARED: "해제"}
-STAGE_NAME = {P.STAGE_NONE: "알림 전", P.STAGE_NEIGHBOR: "옆자리 알림", P.STAGE_ALL: "반 전체 알림",
-              P.STAGE_LONG: "장시간 자리비움"}
-EXPLAIN_NAME = {P.EXPLAIN_NONE: "", P.EXPLAIN_GEMINI: "Gemini", P.EXPLAIN_OLLAMA: "Ollama",
-                P.EXPLAIN_DEFAULT: "기본 문구"}
-DEVICE_KIND_NAME = {P.DEV_SERVER: "서버", P.DEV_CAMERA: "카메라", P.DEV_PANTILT: "팬틸트",
-                    P.DEV_STUDENT: "학생 노트북", P.DEV_CONSOLE: "강사 화면"}
+STATUS_NAME = {"active": "대응 중", "waiting": "대기", "closed": "종료"}
+CLOSE_NAME = {None: "", "resolved": "완료", "expired": "만료", "cleared": "해제"}
+STAGE_NAME = {"none": "알림 전", "neighbor": "옆자리 알림", "all": "반 전체 알림"}
+EXPLAIN_NAME = {None: "", "gemini": "Gemini", "ollama": "Ollama", "default": "기본 문구"}
+
+# device_update 의 node 는 노드 이름 문자열. "pantilt" 는 hub 안의 팬틸트 모듈
+PANTILT_NODE = "pantilt"
+NODE_LABEL = {P.CONTROL_NODE: "Control 서버", P.VISION_NODE: "Vision 서비스", PANTILT_NODE: "팬틸트",
+              P.CONSOLE_NODE: "강사 화면"}
+NODE_KIND = {P.CONTROL_NODE: "서버", P.VISION_NODE: "서버", PANTILT_NODE: "팬틸트",
+             P.CONSOLE_NODE: "강사 화면"}
 
 
-def node_name(node: int) -> str:
-    """device_update에는 이름이 없어서 노드 번호로 표시 이름을 만든다 (Data Structure v2 device.node)"""
-    fixed = {P.NODE_CONTROL: "Control 서버", P.NODE_VISION: "Vision 서비스", P.NODE_PANTILT: "팬틸트",
-             P.NODE_CONSOLE: "강사 화면", P.NODE_CAM1: "고정 카메라 (cam1)", P.NODE_CAM2: "팬틸트 카메라 (cam2)"}
-    if node in fixed:
-        return fixed[node]
-    if node in P.NODE_STUDENTS:
-        return f"학생 노트북 {node - 10}"
-    return f"노드 {node}"
+def node_name(node: str) -> str:
+    seat = P.student_seat(node)
+    if seat:
+        return f"학생 노트북 {seat}"
+    return NODE_LABEL.get(node, node)
+
+
+def node_kind(node: str) -> str:
+    return "학생 노트북" if P.student_seat(node) else NODE_KIND.get(node, "")
 
 
 def hms(ts: float) -> str:

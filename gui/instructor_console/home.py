@@ -12,17 +12,17 @@ from typing import Callable
 from PyQt6.QtCore import QDate, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFrame, QGridLayout,
-                             QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QMessageBox,
+                             QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
                              QPushButton, QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
                              QWidget)
 
 from common import protocol as P
 
 from . import theme as T
-from .store import SEATS, Store, mask_to_neighbors
+from .store import SEATS, Store
 from .video import ClipPlayer, LiveVideo, UdpFrameSource
 
-PAGE_SIZE = 50          # log_result 한 번에 최대 50건
+PAGE_SIZE = 50          # 로그 한 번에 최대 50건
 
 
 def card(title: str | None = None) -> tuple[QFrame, QVBoxLayout]:
@@ -41,33 +41,33 @@ def today_start() -> float:
 
 # ── 로그 검색 요청 관리 ─────────────────────────────────────
 class LogQueries(QObject):
-    """log_query의 req 번호로 응답을 요청한 곳에 돌려준다. 여러 화면이 동시에 검색해도 섞이지 않게."""
+    """이벤트 로그 검색. Control(hub)에는 로그 검색 메시지가 없으므로, 이 화면이 켜진 뒤
+    받은 이벤트(snapshot·event_update, 닫힌 것 포함) 안에서 찾는다.
+    결과 형식은 화면 쪽이 그대로 쓰도록 {"items": [...], "total": n} 으로 콜백에 돌려준다."""
 
-    def __init__(self, send: Callable, store: Store, parent=None):
+    def __init__(self, store: Store, parent=None):
         super().__init__(parent)
-        self.send, self._req = send, 0
-        self._waiting: dict[int, Callable] = {}
-        self.items: dict[int, dict] = {}       # event_id → 마지막으로 받은 로그 항목 (이벤트 창 보조 정보)
-        store.log_result.connect(self._on_result)
+        self.store = store
 
-    def query(self, cb: Callable, kind=0, seat=0, student_name="", t_from=0.0, t_to=0.0, offset=0) -> bool:
-        self._req = 1 if self._req >= 0xFFFF else self._req + 1
-        sent = self.send(P.LOG_QUERY, {"req": self._req, "kind": kind, "seat": seat, "student_name": student_name,
-                                       "from": t_from, "to": t_to, "offset": offset})
-        if sent:                               # 못 보낸 요청의 콜백은 남기지 않는다
-            self._waiting[self._req] = cb
-        return sent
-
-    def _on_result(self, m: dict):
-        for it in m["items"]:
-            self.items[it["event_id"]] = it
-        cb = self._waiting.pop(m["req"], None)
-        if cb:
-            cb(m)
+    def query(self, cb: Callable, kind="", seat=0, student_name="", t_from=0.0, t_to=0.0, offset=0) -> bool:
+        items = []
+        for e in self.store.events.values():
+            if kind and e["kind"] != kind:
+                continue
+            if seat and e["seat"] != seat:
+                continue
+            name = self.store.student_name(e["seat"])
+            if student_name and student_name not in name:
+                continue
+            if (t_from and e["detected_at"] < t_from) or (t_to and e["detected_at"] >= t_to):
+                continue
+            items.append({**e, "student_name": name, "has_clip": False})
+        items.sort(key=lambda e: -e["detected_at"])
+        cb({"items": items[offset:offset + PAGE_SIZE], "total": len(items)})
+        return True
 
     def reset(self):
-        """연결이 끊기면 기다리던 검색은 답이 오지 않는다 → 버린다"""
-        self._waiting.clear()
+        pass
 
 
 # ── 1. 전체 학생 모니터링 (좌석도) ───────────────────────────
@@ -93,18 +93,18 @@ class SeatCard(QFrame):
         self.clicked.emit(self.seat)
 
     def update_view(self, name: str, ev: dict | None, extra: int, offline: bool = False):
-        kind = ev["kind"] if ev else P.KIND_NONE
+        kind = ev["kind"] if ev else T.NO_KIND
         color, bg = T.KIND_COLOR[kind], T.KIND_BG[kind]
         if offline and not ev:                    # 학생 노트북 끊김 = 쓰러짐 알림을 못 받는 자리
             bg = T.OFFLINE_ORANGE
-        width = 3 if kind == P.KIND_FALL else (2 if ev else 1)
+        width = 3 if kind == "fall" else (2 if ev else 1)
         self.setStyleSheet(f"SeatCard {{ background:{bg}; border:{width}px solid {color}; border-radius:12px; }}"
                            "QLabel { background: transparent; border: none; }")
         self.num.setStyleSheet("font-size:22px; font-weight:700; color:#202124;")
         self.name.setText(name or "미등록")
         self.name.setStyleSheet(f"font-size:15px; color:{'#3c4043' if name else '#b0b4b8'};")
         if ev:   # 평상시는 거의 안 보이게, 이벤트가 있을 때만 상태를 크게
-            self.state.setText(T.KIND_NAME[kind] + (" · 대기" if ev["status"] == P.ST_WAITING else ""))
+            self.state.setText(T.KIND_NAME[kind] + (" · 대기" if ev["status"] == "waiting" else ""))
             self.state.setStyleSheet(f"font-size:15px; font-weight:700; color:{color};")
             sub = T.elapsed(ev["detected_at"])
             if ev["confirmed_at"]:
@@ -143,9 +143,10 @@ class SeatMap(QWidget):
             self.cards[s] = c
         lay.addLayout(grid, 1)
         legend = QHBoxLayout()
-        for k in (P.KIND_FALL, P.KIND_QUESTION, P.KIND_AWAY):
+        for k in T.KINDS:
             dot = QLabel("●"); dot.setStyleSheet(f"color:{T.KIND_COLOR[k]};")
-            legend.addWidget(dot); legend.addWidget(QLabel(f"{T.KIND_NAME[k]} ({k}순위)", objectName="muted"))
+            legend.addWidget(dot)
+            legend.addWidget(QLabel(f"{T.KIND_NAME[k]} ({P.INCIDENT_PRIORITY[k]}순위)", objectName="muted"))
             legend.addSpacing(10)
         legend.addStretch(1)
         lay.addLayout(legend)
@@ -153,7 +154,7 @@ class SeatMap(QWidget):
     def refresh(self):
         for s, c in self.cards.items():
             evs = self.store.open_events(s)
-            d = self.store.devices.get(P.NODE_STUDENTS[s - 1])
+            d = self.store.student_device(s)
             c.update_view(self.store.student_name(s), evs[0] if evs else None, max(0, len(evs) - 1),
                           offline=bool(d and not d["online"]))
 
@@ -182,8 +183,8 @@ class EventPanel(QWidget):
         self.video_stack = QStackedWidget()
         self.live = LiveVideo(cam2, title="팬틸트 카메라 실시간")
         self.clip = ClipPlayer(clip_root)
-        self.clip.request_clip.connect(lambda eid: self.send(P.CLIP_REQUEST, {"event_id": eid}))
-        store.clip_info.connect(self.clip.on_clip_info)
+        # Control 에 녹화 요청 메시지가 아직 없다 → 바로 '녹화 없음'으로 답한다
+        self.clip.request_clip.connect(lambda eid: self.clip.on_clip_info({"event_id": eid, "status": "none"}))
         self.video_stack.addWidget(self.live)
         self.video_stack.addWidget(self.clip)
         self.video_mode = QLabel(objectName="muted")
@@ -208,29 +209,14 @@ class EventPanel(QWidget):
         btns = QHBoxLayout()
         self.b_confirm = QPushButton("확인", objectName="primary")
         self.b_resolve = QPushButton("완료")
-        self.b_dismiss = QPushButton("오감지")
         self.b_confirm.setToolTip("쓰러짐은 단계 알림을 멈추고, 질문은 '응답 중'으로 바뀝니다")
-        self.b_dismiss.setToolTip("잘못 감지된 이벤트로 닫습니다")
-        self.b_confirm.clicked.connect(lambda: self.send(P.CONFIRM, {"event_id": self.event_id}))
-        self.b_resolve.clicked.connect(lambda: self.send(P.RESOLVE, {"event_id": self.event_id}))
-        self.b_dismiss.clicked.connect(self._dismiss)
+        self.b_confirm.clicked.connect(lambda: self.send("confirm", {"event_id": self.event_id}))
+        self.b_resolve.clicked.connect(lambda: self.send("resolve", {"event_id": self.event_id}))
+        # '오감지' 버튼은 Control 에 해당 메시지(dismiss)가 생기면 다시 넣는다
         btns.addStretch(1)
-        for b in (self.b_confirm, self.b_resolve, self.b_dismiss):
+        for b in (self.b_confirm, self.b_resolve):
             b.setMinimumWidth(90); btns.addWidget(b)
         lay.addLayout(btns)
-
-    def _dismiss(self):
-        """오감지는 이벤트를 닫고 단계 알림도 멈추므로 한 번 더 묻는다 (완료 버튼 옆이라 잘못 누르기 쉬움)"""
-        ev = self._data()
-        if not ev:
-            return
-        warn = "\n\n⚠ 쓰러짐입니다. 학생 상태를 직접 확인했나요?" if ev["kind"] == P.KIND_FALL else ""
-        ans = QMessageBox.question(
-            self, "오감지로 닫기",
-            f"{ev['seat']}번 좌석 {T.KIND_NAME[ev['kind']]} 이벤트를 잘못 감지된 것으로 닫습니다.{warn}",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        if ans == QMessageBox.StandardButton.Yes:
-            self.send(P.DISMISS, {"event_id": self.event_id})
 
     def open(self, event_id: int):
         self.event_id = event_id
@@ -238,22 +224,15 @@ class EventPanel(QWidget):
         self.refresh()
 
     def _data(self) -> dict | None:
-        ev = self.store.events.get(self.event_id)
-        if ev:
-            return ev
-        it = self.logs.items.get(self.event_id)     # 지난 이벤트는 로그 항목만 있을 수 있다
-        if it:
-            return {**it, "alert_stage": None, "confirmed_at": 0.0, "explain_text": "", "explain_mode": 0,
-                    "_from_log": True}
-        return None
+        return self.store.events.get(self.event_id)
 
     def refresh(self):
         ev = self._data()
         if not ev:
             self.title.setText(f"이벤트 #{self.event_id} (정보 없음)")
             return
-        kind, is_open = ev["kind"], ev["status"] != P.ST_CLOSED
-        name = self.store.student_name(ev["seat"]) if is_open else ev.get("student_name") or self.store.student_name(ev["seat"])
+        kind, is_open = ev["kind"], ev["status"] != "closed"
+        name = self.store.student_name(ev["seat"])
         self.title.setText(f"{ev['seat']}번 좌석 · {name or '미등록'} · {T.KIND_NAME[kind]}")
         self.title.setStyleSheet(f"font-size:17px; font-weight:700; color:{T.KIND_COLOR[kind]};")
 
@@ -268,16 +247,17 @@ class EventPanel(QWidget):
                 self.video_mode.setText("지난 이벤트 — 녹화 영상 다시 보기")
                 self.clip.load(self.event_id)
 
-        status = T.STATUS_NAME[ev["status"]]
-        if ev["status"] == P.ST_CLOSED and ev.get("close_reason"):
-            status += f" ({T.CLOSE_NAME[ev['close_reason']]})"
-        elif ev["status"] == P.ST_ACTIVE and self.store.queue.get("active") == self.event_id:
+        status = T.STATUS_NAME.get(ev["status"], ev["status"])
+        if ev["status"] == "closed" and ev.get("close_reason"):
+            status += f" ({T.CLOSE_NAME.get(ev['close_reason'], ev['close_reason'])})"
+        elif ev["status"] == "active" and self.store.queue.get("active") == self.event_id:
             status += " · 카메라가 보는 중"
         self.fields["status"].setText(status)
         self.fields["detected"].setText(T.mdhm(ev["detected_at"]))
         self.fields["elapsed"].setText(T.elapsed(ev["detected_at"], ev["closed_at"] or None))
-        self.fields["stage"].setText("—" if ev.get("alert_stage") is None else T.STAGE_NAME[ev["alert_stage"]])
-        self.fields["confirmed"].setText(T.hms(ev["confirmed_at"]) if ev["confirmed_at"] else ("—" if ev.get("_from_log") else "아직 안 함"))
+        stage = ev.get("alert_stage") or "none"
+        self.fields["stage"].setText("—" if kind != "fall" else T.STAGE_NAME.get(stage, stage))
+        self.fields["confirmed"].setText(T.hms(ev["confirmed_at"]) if ev["confirmed_at"] else "아직 안 함")
         self.fields["closed"].setText(T.hms(ev["closed_at"]))
         if ev["explain_text"]:
             mode = T.EXPLAIN_NAME.get(ev["explain_mode"], "")
@@ -287,7 +267,6 @@ class EventPanel(QWidget):
 
         self.b_confirm.setEnabled(is_open and not ev["confirmed_at"])
         self.b_resolve.setEnabled(is_open)
-        self.b_dismiss.setEnabled(is_open)
 
 
 # ── 3. 학생 정보 창 ─────────────────────────────────────────
@@ -361,7 +340,7 @@ class StudentPanel(QWidget):
         self.today.clear()
         for it in m["items"]:
             txt = (f"{T.mdhm(it['detected_at'])}  {T.KIND_NAME[it['kind']]}  "
-                   f"{T.CLOSE_NAME[it['close_reason']] or T.STATUS_NAME[it['status']]}"
+                   f"{T.CLOSE_NAME.get(it['close_reason']) or T.STATUS_NAME.get(it['status'], '')}"
                    + ("   ▶ 영상" if it["has_clip"] else ""))
             li = QListWidgetItem(txt)
             li.setForeground(QColor(T.KIND_COLOR[it["kind"]]))
@@ -386,23 +365,17 @@ class StudentPanel(QWidget):
         ev = self.store.seat_top_event(self.seat)
         self.fields["state"].setText(T.KIND_NAME[ev["kind"]] if ev else "일반")
         self.fields["state"].setStyleSheet(f"font-weight:600; color:{T.KIND_COLOR[ev['kind']] if ev else '#202124'};")
-        # seat_info에는 등록 시각이 없다 → 등록 번호만 표시 (Interface Spec 보완 필요)
-        self.fields["reg"].setText(f"등록 번호 {s['reg_id']}" if s["reg_id"] else "—")
-        nbs = mask_to_neighbors(s["neighbors"])
+        # 자리 등록 정보는 아직 Control 이 보내지 않는다
+        self.fields["reg"].setText("등록됨" if name else "—")
+        nbs = s["neighbors"]
         self.fields["nb"].setText(", ".join(f"{n}번 {self.store.student_name(n) or '(미등록)'}" for n in nbs) or "—")
 
-        d = self.store.devices.get(10 + self.seat)
-        if d:
-            net = self._ok(bool(d["online"]))
-            if d["online"] and d["rtt_ms"]:
-                net += f" <span style='color:#80868b'>{d['rtt_ms']}ms</span>"
-            self.dev["net"].setText(net)
-            self.dev["cam"].setText(self._ok(bool(d["cam_ok"]) if d["online"] else None))
-        else:
-            self.dev["net"].setText(self._ok(None)); self.dev["cam"].setText(self._ok(None))
-        c1, c2 = self.store.devices.get(P.NODE_CAM1), self.store.devices.get(P.NODE_CAM2)
-        self.dev["cam1"].setText(self._ok(bool(c1["online"]) if c1 else None))
-        cam2 = self._ok(bool(c2["online"]) if c2 else None)
+        d = self.store.student_device(self.seat)
+        self.dev["net"].setText(self._ok(bool(d["online"]) if d else None))
+        # 노트북 카메라·cam1·cam2 상태는 아직 Control 이 Console 에 보내지 않는다 → 정보 없음
+        self.dev["cam"].setText(self._ok(None))
+        self.dev["cam1"].setText(self._ok(None))
+        cam2 = self._ok(None)
         if not s["has_preset"]:
             cam2 += " <span style='color:#e8710a'>· 각도 미등록</span>"
         self.dev["cam2"].setText(cam2)
@@ -428,8 +401,8 @@ class LogPanel(QWidget):
         # 검색: 이벤트별 · 학생별 · 기간별
         r1 = QHBoxLayout()
         self.kind = QComboBox()
-        self.kind.addItem("전체 종류", 0)
-        for k in (P.KIND_FALL, P.KIND_QUESTION, P.KIND_AWAY):
+        self.kind.addItem("전체 종류", "")
+        for k in T.KINDS:
             self.kind.addItem(T.KIND_NAME[k], k)
         self.student = QComboBox(editable=True)
         self.student.lineEdit().setPlaceholderText("학생 이름")
@@ -520,11 +493,11 @@ class LogPanel(QWidget):
         for r, it in enumerate(self.items):
             live = self.store.events.get(it["event_id"])
             status, reason = (live["status"], live["close_reason"]) if live else (it["status"], it["close_reason"])
-            unconfirmed = bool(live and status != P.ST_CLOSED and not live["confirmed_at"])
+            unconfirmed = bool(live and status != "closed" and not live["confirmed_at"])
             name = it["student_name"] or "(미등록)"
             cells = [T.mdhm(it["detected_at"]), f"{it['seat']}번", name, T.KIND_NAME[it["kind"]],
-                     T.CLOSE_NAME[reason] if status == P.ST_CLOSED else T.STATUS_NAME[status],
-                     "▶" if it["has_clip"] else ""]
+                     T.CLOSE_NAME.get(reason, reason) if status == "closed" else T.STATUS_NAME.get(status, status),
+                     "▶" if it.get("has_clip") else ""]
             for c, text in enumerate(cells):
                 cell = QTableWidgetItem(text)
                 cell.setData(Qt.ItemDataRole.UserRole, it["event_id"])
@@ -540,7 +513,7 @@ class LogPanel(QWidget):
             self.table.selectRow(sel_row)
         else:
             self.table.clearSelection()
-        self.count.setText(f"{len(self.items)} / {self.total}건 · 굵은 줄 = 확인 안 함")
+        self.count.setText(f"{len(self.items)} / {self.total}건 · 굵은 줄 = 확인 안 함 · 이 화면을 켠 뒤 받은 이벤트만")
         self.more.setEnabled(len(self.items) < self.total)
         names = sorted({it["student_name"] for it in self.items if it["student_name"]} |
                        {self.store.student_name(s) for s in SEATS if self.store.student_name(s)})

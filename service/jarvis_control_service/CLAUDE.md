@@ -2,13 +2,16 @@
 
 이 폴더에서 작업할 때 따르는 설계 기준.
 원본: Confluence "Control Server 상세 설계" v0.1 (2026-10-19) — https://skypol-sesac.atlassian.net/wiki/x/BABt
+연결 구조: Confluence "System Architecture" SW Architecture 그림 (2026-10-20 판) — https://skypol-sesac.atlassian.net/wiki/spaces/1/pages/360667/System+Architecture
 원본이 바뀌면 이 파일도 다시 맞춘다. 원본과 다르면 **원본이 우선**이다.
 
 ## 핵심 원칙
 
 - **기존 코드(지우님 구현)를 기반으로 하고, 비어 있는 이벤트 관리만 추가한다. 새로 짜지 않는다.**
 - 모든 프로그램(Vision, 팬틸트 제어, 강사 화면, 학생 화면)은 TCP 노드로 Control에 붙고, 통신은 `NodeClient` 하나를 같이 쓴다.
-- 카메라 영상은 Control을 거치지 않는다. UDP로 Vision Service에 바로 간다.
+- **카메라 영상은 Control을 거쳐 Vision Service로 간다** (10/21 설계 변경). 두 Camera Streamer(팬틸트·고정) → Control (UDP) → Vision Service (UDP).
+  Vision의 판정 결과·사건은 TCP(`NodeClient`)로 Control에 온다.
+- 영상 중계는 판단이 아니다. `event_manager`를 거치지 않고 DB에도 기록하지 않는다. 중계 때문에 asyncio 루프(0.1초 `tick`)가 막히면 안 된다.
 - **판단(우선순위, 선점, 대기열, 단계 알림, 만료, 추적 대상)은 `event_manager.py` 한 곳에서만 한다.** 화면도 Vision도 판단하지 않는다.
 - **DB에 쓰는 곳은 `db.py`뿐이다.** 다른 도구는 읽기만 한다. DB는 SQLite 파일 하나.
 - LLM 상황 설명: Gemini API가 기본, Ollama가 백업.
@@ -34,7 +37,10 @@ aiot_repo_3/
 ├─ service/jarvis_DB/create.sql               DB 스키마 원본 (db.py 가 시작할 때 실행)
 ├─ service/jarvis_vision_service/run_assistant.py   vision_service 노드
 ├─ hw/camera_controller/run_controller.py     camera_controller 노드 (Serial → Arduino)
-└─ hw/camera_streamer/run_streamer.py         UDP 영상 송출 (TCP 노드 아님)
+└─ hw/camera_streamer/                        UDP 영상 송출 → Control (TCP 노드 아님)
+    ├─ run_fixed_camera.py                    고정 카메라(내장 웹캠, cam1)
+    ├─ run_pantilt_camera.py                  팬틸트 카메라(USB, cam2)
+    └─ streamer.py                            두 실행 파일이 같이 쓰는 송출 코드
 ```
 
 - `common/`은 저장소 최상위에 있다. 각 폴더의 run 파일은 저장소 최상위(`aiot_repo_3/`)를 `sys.path` 맨 앞에 넣고 `from common... import`한다.
@@ -55,10 +61,18 @@ aiot_repo_3/
 ```bash
 python3 run_hub.py                                  # control 서버 (또는 python3 -m hub -v)
 python3 -m unittest tools.test_event_manager -v     # event_manager 단위 테스트 (가짜 시계)
+python3 -m unittest tools.test_protocol -v          # 바이너리 프레임 단위 테스트 (왕복, 스트림 쪼개짐, CRC, 깨진 바이트)
 python3 -m tools.fake_node --server 127.0.0.1       # 통신 시나리오: 질문 → 쓰러짐 선점 → confirm/resolve
 python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fall_alert 까지
 ```
 
+- 로그는 화면과 `logs/hub.log`(5MB × 5개 순환, git 제외)에 같이 남는다. `--log-file ""`이면 화면에만.
+- 학생 노드 수신 확인: `grep hub.student logs/hub.log`
+  - `수신 OK student_client_N condition_summary ...` / `수신 OK ... fall_confirm` — 받아서 처리함
+  - `수신 실패 ...` — 형식이 틀려 버림 (이유가 같이 찍힘)
+  - `전송 OK -> student_client_N fall_alert ...` — 학생에게 알림을 보냄
+  - `... condition_summary 가 30초째 없음` — 접속은 살아 있는데 판정 결과가 안 옴 (학생 프로그램 확인)
+  - `학생 수신 현황 | 1번 OK 최근 6건 ... | 2번 미접속 ...` — 1분마다 좌석별 요약
 - `SchemaMismatch` 오류가 나면 `db/hub.db`, `db/hub.db-wal`, `db/hub.db-shm`을 지우고 다시 실행한다. 스키마를 바꾸면 `db.py`의 `SCHEMA_VERSION`을 올린다.
 
 ## 코드 구조 (판단과 실행의 분리)
@@ -91,12 +105,30 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 - D8 좌석은 1~4번. 5번(매트) 없음.
 - D9 하트비트는 `messages`에 기록하지 않음. 타이머는 Control 시계 기준. asyncio 메인 루프가 0.1초마다 `tick` 호출.
 
-## SA와 다른 점 (SA 그림은 유지)
+## SA 그림과의 관계
 
-- DEV-01 Control ↔ Vision: HTTP 대신 TCP(`NodeClient`).
-- DEV-02 Camera Streamer → Vision Service로 UDP 직접 (Control 경유 안 함).
-- DEV-03 Control → `camera_controller` 노드(TCP) → Serial → Arduino. 시리얼 포트는 그 노드만 잡는다.
-- DEV-04 DB는 SQLite 파일, Control만 접근.
+10/20 SW Architecture 그림 기준 연결:
+
+| 구간 | 그림 | 용도 |
+| --- | --- | --- |
+| Camera Streamer(팬틸트·고정) → Control | UDP | 영상 |
+| Control → Vision AI Service | UDP / TCP | 영상 중계(UDP) + 메시지(TCP) |
+| Vision AI Service → Control | TCP | 사건·`track_offset`·`explain_text`·하트비트 |
+| Vision AI Service → LLM API (Gemini) | HTTP | 상황 설명 |
+| Control ↔ Instructor Console | TCP/UDP | 메시지(TCP). UDP 용도는 미정 (아래 5번) |
+| Control ↔ Student Client | TCP | 메시지 |
+| Control → Camera Controller (팬틸트 보드) | Serial | 팬틸트 명령 |
+| Control ↔ Jarvis DB | - | Control만 접근 |
+
+그림과 맞춰진 것 (예전 DEV 항목 정리):
+
+- DEV-01 (해소) Control ↔ Vision 메시지는 TCP(`NodeClient`). 그림도 HTTP가 아니라 TCP.
+- DEV-02 (폐지, 10/21) 예전엔 Camera Streamer → Vision 직접이었으나, 이제 그림대로 Control을 거친다.
+- DEV-04 (일치) DB는 SQLite 파일, Control만 접근.
+
+그림과 아직 다른 점:
+
+- DEV-03 그림은 Control → Serial → Camera Controller. 코드는 Control → `camera_controller` 노드(TCP) → Serial → Arduino. 시리얼 포트는 그 노드만 잡는다 (같은 PC에서 돌아도 됨).
 
 ## 이름 규칙 (소문자_밑줄)
 
@@ -110,7 +142,8 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 | `instructor_console` | run_console.py | 신규, 메인 대시보드 |
 | `student_client_1` ~ `student_client_4` | run_client.py | 기존 student1~4 |
 
-카메라 스트리머는 TCP 노드가 아니다. 카메라 상태는 `vision_service` 하트비트에 `cam1_fps`, `cam2_fps`로 실린다.
+카메라 스트리머는 TCP 노드가 아니다 (UDP로 Control에 영상만 보낸다). 카메라 상태는 지금은 `vision_service` 하트비트에 `cam1_fps`, `cam2_fps`로 실린다.
+영상이 Control을 거치게 되었으므로 Control이 직접 받은 fps로 바꿀지는 미정 (아래 7번).
 
 사건 종류:
 
@@ -121,17 +154,40 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 | `leave_seat` | `away` | 3 |
 | `drowsy`, `posture` | 삭제 → `condition_summary`(집계) | - |
 
-공통 메시지 형식 (기존 형식 유지):
+공통 메시지 형식 — **TCP 위의 바이너리 프레임 v3** (10/21 변경, 기준은 `common/protocol.py` 맨 위 설명):
 
-```json
-{"v":1, "node":"vision_service", "seq":1042, "type":"question", "seat":2,
- "ts":1760500000.123, "value":{"state":"start"}, "conf":0.81}
-```
+| 바이트 | 필드 | 형식 | 내용 |
+| --- | --- | --- | --- |
+| 0-1 | magic | 2s | `0xAA 0x55` |
+| 2 | version | uint8 | 3 (v1 = 줄 단위 JSON 폐기. 2번은 폐기된 student_client 시험 패킷이 써서 건너뜀) |
+| 3 | node | uint8 | `NODE_CODES`: control 0 · vision 1 · camera 2 · console 3 · student 11~14 (DB `device.node`와 같음) |
+| 4 | type | uint8 | `TYPE_CODES`: 공통 0x0_ · 사건 0x1_ · vision 0x2_ · camera 0x3_ · console 0x4_ · student 0x5_ |
+| 5 | seat | uint8 | 1~4, 0 = 없음 |
+| 6-9 | seq | uint32 | |
+| 10-17 | ts | float64 | 보낸 PC 시각 |
+| 18-21 | conf | float32 | |
+| 22-25 | length | uint32 | 값 바이트 수 (최대 1 MiB) |
+| 26-… | payload | TLV | value dict (None/bool/int64/float64/str/list/dict 태그 인코딩) |
+| 끝 2 | crc | uint16 | CRC-16/CCITT (version ~ payload) |
+
+- 빅엔디언. 받는 쪽은 `FrameReader`로 시작 표시를 찾아 자르고, 헤더(버전·코드·길이)나 CRC가 틀리면 1바이트씩 밀어 다시 찾는다 (연결은 유지).
+- `encode()`/`parse_message()`가 주고받는 dict는 예전과 같다. 노드 코드와 `event_manager`는 형식을 모른다:
+  `{"v":3, "node":"vision_service", "seq":1042, "type":"question", "seat":2, "ts":1760500000.123, "value":{"state":"start"}, "conf":0.81}`
+- 새 노드·메시지 종류를 추가할 때는 `NODE_CODES`/`TYPE_CODES`에도 번호를 준다 (안 맞으면 import 할 때 assert 로 멈춤).
 
 - `ts`는 보낸 PC의 시계. Control은 받는 순간 `rx_ts`(Control 시계)를 붙이고 **모든 판단은 `rx_ts`로 한다.**
 - Interface Specification(IF-01~05)과 다르면 코드가 기준이다.
 
 ## 메시지 목록
+
+영상 (UDP, 바이너리 프레임 v3 아님):
+
+| 경로 | 내용 |
+| --- | --- |
+| `camera_streamer`(cam1 팬틸트, cam2 고정) → control | 카메라 영상 |
+| control → `vision_service` | 받은 영상을 그대로 넘김 (중계) |
+
+포트·패킷 형식·재인코딩 여부는 미정 (아래 8번). 정해지기 전에는 기존 streamer 패킷을 바꾸지 않고 그대로 넘기는 것을 기본으로 한다.
 
 vision_service ↔ control:
 
@@ -261,10 +317,13 @@ track:
 | 단계 | 방법 | 확인 |
 | --- | --- | --- |
 | 단위 | `event_manager`에 가짜 시계 + 사건 순서대로 | 선점, FIFO, 15/30초 알림, 만료, 중복 무시 |
+| 단위 | `tools/test_protocol.py` | 바이너리 프레임 왕복, 헤더 배치, 쪼개짐·붙음, CRC, 옛 형식 거부 |
 | 통신 | `tools/fake_node.py`로 vision_service·instructor_console 흉내 | question start → event_update → confirm → resolve → queue_state |
 | 통합 1 (10/20) | 실제 Vision B → Control → 대시보드 → 팬틸트 preset | 질문 1건이 끝까지 흐르는지 |
 | 통합 2 | 질문 추적 중 쓰러짐 | 선점, 학생 노트북 fall_alert |
+| 통신 (영상) | streamer → control → vision_service | Vision이 받는 cam1·cam2 fps가 직접 받을 때와 비슷한지, control `tick`이 밀리지 않는지 |
 | 장애 | vision_service 끄기, Arduino 뽑기 | "감지 중단" 표시, 추적만 멈추고 알림 계속 |
+| 장애 | camera_streamer 끄기 | 해당 카메라 fps 0 → 장비 상태에 표시 |
 
 ## 아직 정해지지 않은 것 (임의로 정하지 말고 물어볼 것)
 
@@ -272,5 +331,7 @@ track:
 2. 자리비움도 팬틸트로 추적할지
 3. `question_expire_s`, `away_alert_s` 값
 4. 최상위 `common/` 폴더 추가 (강사님 확인)
-5. 대시보드에 추적 카메라 영상을 띄울지
-6. Interface Specification(IF-01~05) 수정 담당·시점
+5. 대시보드에 추적 카메라 영상을 띄울지 — SA 그림의 Control ↔ Instructor Console이 TCP/UDP로 되어 있음. UDP가 영상 송출용인지 확인
+6. Interface Specification(IF-01~05) 수정 담당·시점 (영상 경로 변경도 반영 필요)
+7. 카메라 상태(fps)를 Control이 직접 잴지, 지금처럼 `vision_service` 하트비트로 받을지
+8. 영상 중계 상세: 받는 포트·보내는 포트, 패킷 형식, 그대로 넘길지 재인코딩할지, 중계 코드 위치(파일)

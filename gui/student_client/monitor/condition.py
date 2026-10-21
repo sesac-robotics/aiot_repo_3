@@ -30,3 +30,10 @@ class ConditionLatch:
         if reset:
             self.reset()
         return out
+
+
+def to_summary(flags: dict) -> dict:
+    """세부 4개 → control 의 condition_summary 형식 {"focus_low", "posture_bad"} (jarvis_control_service/CLAUDE.md)
+    강사에게는 반 집계만 가므로(SR_006) 세부 항목은 학생 화면에만 쓰고 control 에는 보내지 않는다."""
+    return {"focus_low": any(bool(flags.get(k)) for k in FACE_KEYS),
+            "posture_bad": bool(flags.get("forward_lean"))}

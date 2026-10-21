@@ -2,6 +2,7 @@
 모든 노드가 같이 쓰는 control 접속 클라이언트 (SA 설계서 3·5·10절, 상세 설계 0장)
 
 - 백그라운드 스레드가 접속·재접속(2초 간격)·하트비트(2초)·수신을 맡는다.
+- 주고받는 형식은 common/protocol.py 의 바이너리 프레임 v3 (encode / FrameReader / parse_message).
 - 노드 코드는 카메라 루프 안에서 client.send(...) 만 부르면 된다 (asyncio 몰라도 됨).
 - 끊긴 동안 사건 이벤트와 버튼 입력(confirm·resolve·fall_confirm)은 버퍼에 모았다가
   재접속하면 보낸다. heartbeat·track_offset 같은 상태 메시지는 버린다(곧 새 값이 오므로).
@@ -24,7 +25,7 @@ import socket
 import threading
 
 from common.protocol import (BUFFERED_TYPES, DEFAULT_PORT, HEARTBEAT_INTERVAL_S,
-                             MessageError, encode, make_message, parse_message)
+                             FrameReader, MessageError, encode, make_message, parse_message)
 
 log = logging.getLogger("client")
 
@@ -84,24 +85,29 @@ class NodeClient:
         with self._lock:
             self._seq += 1
             msg = make_message(self.node, self._seq, type_, seat, value, conf)
+            try:
+                data = encode(msg)             # 보내는 순간 바이너리로 (잘못된 값은 여기서 걸러짐)
+            except MessageError as e:
+                log.error("보낼 수 없는 메시지 - 버림: %s (%s)", e, msg)
+                return False
             if self._sock is None:             # 끊겼거나 재접속 중(밀린 것 보내는 중): 순서대로 뒤에 붙인다
                 if type_ in BUFFERED_TYPES:
-                    self._pending.append(msg)
+                    self._pending.append((msg, data))
                 return False
-        if self._write(msg):
+        if self._write(data):
             return True
         if type_ in BUFFERED_TYPES:
-            self._pending.append(msg)          # 사건·버튼 입력은 재접속 후 다시 보냄
+            self._pending.append((msg, data))  # 사건·버튼 입력은 재접속 후 다시 보냄
         return False
 
     # ---- 내부 -----------------------------------------------------------
-    def _write(self, msg: dict) -> bool:
+    def _write(self, data: bytes) -> bool:
         with self._lock:
             sock = self._sock
             if sock is None:
                 return False
             try:
-                sock.sendall(encode(msg))
+                sock.sendall(data)
                 return True
             except OSError as e:
                 log.warning("전송 실패: %s", e)
@@ -144,21 +150,20 @@ class NodeClient:
                 self._stop.wait(RECONNECT_INTERVAL_S)
 
     def _recv_loop(self, sock: socket.socket):
-        buf = b""
+        reader = FrameReader()
         while not self._stop.is_set():
             try:
-                data = sock.recv(4096)
+                data = sock.recv(65536)
             except OSError:
                 return
             if not data:
                 return
-            buf += data
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if not line.strip():
-                    continue
+            frames = reader.feed(data)
+            while reader.errors:
+                log.warning("control 스트림 오류: %s", reader.errors.pop(0))
+            for frame in frames:
                 try:
-                    msg = parse_message(line)
+                    msg = parse_message(frame)
                 except MessageError as e:
                     log.warning("control 메시지 오류: %s", e)
                     continue
@@ -177,10 +182,15 @@ class NodeClient:
                 for type_, value in (("heartbeat", self._heartbeat_value()),
                                      ("node_info", self._node_info_value(sock))):
                     self._seq += 1
-                    sock.sendall(encode(make_message(self.node, self._seq, type_, None, value)))
+                    try:
+                        data = encode(make_message(self.node, self._seq, type_, None, value))
+                    except MessageError as e:      # set_info/set_status 에 보낼 수 없는 값이 들어간 경우
+                        log.error("%s 를 보낼 수 없음 - 건너뜀: %s", type_, e)
+                        continue
+                    sock.sendall(data)
                 while self._pending:
-                    msg = self._pending[0]
-                    sock.sendall(encode(msg))
+                    msg, data = self._pending[0]
+                    sock.sendall(data)
                     self._pending.popleft()
                     log.info("밀린 사건 전송: %s seq=%d", msg["type"], msg["seq"])
             except OSError as e:

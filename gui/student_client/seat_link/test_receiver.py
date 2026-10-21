@@ -1,4 +1,6 @@
-"""시험용 수신 서버: 학생 노드가 보낸 바이너리 상태 패킷을 받아 해석해 터미널에 출력 (임시, 받는 쪽이 정해지면 교체)
+"""[폐기] control 통신은 common/protocol.py 바이너리 프레임 v3 를 쓴다 (seat_link/control_link.py). 이 파일은 기록용.
+
+시험용 수신 서버: 학생 노드가 보낸 바이너리 상태 패킷을 받아 해석해 터미널에 출력 (임시, 받는 쪽이 정해지면 교체)
 
 student_client 폴더에서 실행:
   python -m seat_link.test_receiver --port 6000
