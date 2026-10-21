@@ -1,63 +1,105 @@
-"""본인 알림: 화면 아래쪽에 5초 뜨고 사라지는 가벼운 권유 (화면 구성도 v3 학생 ②)
+"""본인 알림 공통 팝업: 화면 아래쪽에 5초 뜨고 사라지는 가벼운 권유 (화면 구성도 v3 학생 ②, SP-230)
 
-- 같은 종류는 COOLDOWN_S 동안 다시 띄우지 않는다 (같은 알림 반복 제한)
-- [알림 끄기]를 누르면 본인 알림만 끈다. 쓰러짐 확인 요청은 끌 수 없다.
-- 문제가 확정된 순간(없다가 생김)에만 띄운다.
+- 문제가 확정된 순간(없다가 생김)에만 띄운다. 문구와 분류(색)는 student_gui/messages.py 표를 따른다.
+- 동시에 여러 개가 생기면 대기열에 넣고 하나씩 SHOW_S초씩 보여 준다 (덮어쓰지 않는다).
+- 같은 종류는 실제로 화면에 띄운 순간부터 COOLDOWN_S 동안 다시 띄우지 않는다 (같은 알림 반복 제한).
+- [알림 끄기]를 누르면 본인 알림만 끄고 대기열도 비운다. 쓰러짐 확인 요청은 끌 수 없다 (별도 창).
+- 띄울 때 로그를 남긴다 (반복 억제 확인용): "본인 알림: drowsy 졸린가요? ..."
+- 판정 상태 말고 다른 곳(예: 장시간 같은 자세)에서는 notify(이름)로 부른다.
 """
+import logging
 import time
+from collections import deque
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QLabel
 
+from student_gui.messages import COLORS, message
+
 SHOW_S = 5
 COOLDOWN_S = 120
-
-MESSAGES = {            # 확정된 문제 → 권유 문구 (판정 이름은 seat_common / posture_ensemble 기준)
-    "drowsy": "졸린가요? 잠깐 일어나 스트레칭해 볼까요?",
-    "yawn": "피곤해 보여요. 물 한 잔 어때요?",
-    "not_forward": "화면으로 다시 돌아와 볼까요?",
-    "posture": "허리를 펴고 어깨를 내려 볼까요?",
-}
+log = logging.getLogger("student_gui")
 
 
 class Notifier(QLabel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.muted = False
-        self._last: dict[str, float] = {}
-        self._prev: set[str] = set()
+        self._muted = False
+        self._last: dict[str, float] = {}         # 종류 → 마지막으로 화면에 띄운 시각
+        self._prev: set[str] = set()              # 직전 프레임에 확정돼 있던 종류
+        self._queue: deque[str] = deque()
+        self._showing = None                      # 지금 떠 있는 종류
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setWordWrap(True)
-        # 반투명 회색. Qt 스타일시트는 #RGBA(예: #333a)를 못 읽고, 하나라도 틀리면 전체를 버린다
-        self.setStyleSheet("background:rgba(51, 51, 51, 170); color:white; border-radius:10px;"
-                           "padding:10px 16px; font-size:15px;")
         self.hide()
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self.hide)
+        self._timer.timeout.connect(self._done)
 
+    # ---- [알림 끄기] -----------------------------------------------------
+    @property
+    def muted(self):
+        return self._muted
+
+    @muted.setter
+    def muted(self, on: bool):
+        self._muted = bool(on)
+        if self._muted:
+            self._queue.clear()
+            self._timer.stop()
+            self._showing = None
+            self.hide()
+
+    # ---- 입력 ------------------------------------------------------------
     def update_state(self, state: dict):
-        """매 프레임 상태를 받아, 새로 확정된 문제만 알린다"""
+        """매 프레임 상태(Monitor.state)를 받아, 새로 확정된 문제만 알린다"""
         if not state.get("present") or state.get("calibrating"):
             self._prev = set()
             return
-        now_set = set(state.get("face", ())) & set(MESSAGES)
+        now_set = {k for k in state.get("face", ()) if message(k)}
         if state.get("posture"):
             now_set.add("posture")
-        for kind in now_set - self._prev:
-            self._maybe_show(kind)
+        for kind in sorted(now_set - self._prev):
+            self.notify(kind)
         self._prev = now_set
 
-    def _maybe_show(self, kind):
-        now = time.monotonic()
-        if self.muted or now - self._last.get(kind, -COOLDOWN_S) < COOLDOWN_S:
+    def notify(self, kind: str):
+        """kind 알림을 띄운다 (끔·반복 억제·이미 대기 중이면 무시)"""
+        if self._muted or message(kind) is None:
             return
-        self._last[kind] = now
-        self.setText(MESSAGES[kind])
-        self._place()
-        self.show()
-        self.raise_()
-        self._timer.start(SHOW_S * 1000)
+        if kind == self._showing or kind in self._queue or self._cooling(kind):
+            return
+        self._queue.append(kind)
+        if self._showing is None:
+            self._next()
+
+    # ---- 표시 ------------------------------------------------------------
+    def _cooling(self, kind):
+        return time.monotonic() - self._last.get(kind, -COOLDOWN_S) < COOLDOWN_S
+
+    def _next(self):
+        while self._queue:
+            kind = self._queue.popleft()
+            if self._cooling(kind):               # 기다리는 동안 다른 경로로 이미 띄웠으면 건너뜀
+                continue
+            group, text = message(kind)
+            self._last[kind] = time.monotonic()
+            self._showing = kind
+            log.info("본인 알림: %s %s", kind, text)
+            self.setStyleSheet(f"background:{COLORS[group]}; color:white; border-radius:10px;"
+                               "padding:10px 16px; font-size:15px;")
+            self.setText(text)
+            self._place()
+            self.show()
+            self.raise_()
+            self._timer.start(int(SHOW_S * 1000))
+            return
+        self._showing = None
+        self.hide()
+
+    def _done(self):
+        self._showing = None
+        self._next()
 
     def _place(self):
         p = self.parentWidget()
