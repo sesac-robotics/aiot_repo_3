@@ -88,8 +88,9 @@ class FacilityPage(QWidget):
         top.addWidget(self.pt_seat); top.addWidget(self.pt_step); top.addStretch(1)
         l3.addLayout(top)
         pad = QGridLayout()
-        for text, r, c, dp, dtl in [("▲ 위", 0, 1, 0, 1), ("◀ 왼쪽", 1, 0, -1, 0), ("▶ 오른쪽", 1, 2, 1, 0),
-                                    ("▼ 아래", 2, 1, 0, -1)]:
+        # 버튼 방향 = 영상이 움직이는 방향 (실물 장착 방향에 맞춰 각도 부호를 뒤집음: 위 = tilt 감소, 왼쪽 = pan 증가)
+        for text, r, c, dp, dtl in [("▲ 위", 0, 1, 0, -1), ("◀ 왼쪽", 1, 0, 1, 0), ("▶ 오른쪽", 1, 2, -1, 0),
+                                    ("▼ 아래", 2, 1, 0, 1)]:
             b = QPushButton(text)
             b.setAutoRepeat(True); b.setAutoRepeatInterval(250)
             b.clicked.connect(lambda _=False, a=dp, t=dtl: self.jog(a, t))
@@ -98,8 +99,8 @@ class FacilityPage(QWidget):
         save.clicked.connect(lambda: self.send("preset_save", {"seat": self.pt_seat.currentData()}))
         pad.addWidget(save, 1, 1)
         l3.addLayout(pad)
-        l3.addWidget(QLabel("방향 부호(설치 방향)는 presets.json의 control.direction에서 바뀔 수 있습니다. "
-                            "범위: Pan 0~180°, Tilt 30~140°", objectName="muted", wordWrap=True))
+        l3.addWidget(QLabel("화살표 방향이 반대면 위 버튼 목록의 부호를 바꿉니다 (자동 추적 방향은 presets.json의 "
+                            "control.direction). 범위: Pan 0~180°, Tilt 30~140°", objectName="muted", wordWrap=True))
         self.preset_state = QLabel()
         l3.addWidget(self.preset_state)
         lay.addWidget(f3, 5)
