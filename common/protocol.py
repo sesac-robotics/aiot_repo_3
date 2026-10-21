@@ -124,4 +124,45 @@ def parse_message(line: bytes) -> dict:
             raise MessageError(f"{msg['type']} 에 seat 없음")
         if msg["value"].get("state") not in INCIDENT_STATES:
             raise MessageError(f"{msg['type']} 의 value.state 는 start/end: {msg['value']}")
+    _check_value(msg["type"], msg["value"])
     return msg
+
+
+# ---- value 값 검사 (노드 -> control 메시지) --------------------------------
+# 잘못된 값이 event_manager·DB 까지 가면 이벤트가 깨지므로 받는 순간 버린다.
+def _is_int(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _is_num(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _is_scalar(x) -> bool:
+    return x is None or isinstance(x, (str, int, float))
+
+
+def _check_value(type_: str, v: dict):
+    def need(cond, what):
+        if not cond:
+            raise MessageError(f"{type_} 의 value 오류 ({what}): {v}")
+
+    if type_ in ("confirm", "resolve"):
+        need(_is_int(v.get("event_id")), "event_id 는 정수")
+    elif type_ == "explain_text":
+        need(_is_int(v.get("event_id")), "event_id 는 정수")
+        need(isinstance(v.get("text", ""), str), "text 는 문자열")
+        need(v.get("mode") is None or isinstance(v["mode"], str), "mode 는 문자열")
+    elif type_ == "fall_confirm":
+        need(v.get("target_seat") in VALID_SEATS and _is_int(v.get("target_seat")),
+             "target_seat 은 좌석 번호")
+    elif type_ == "track_offset":
+        if v.get("found"):
+            need(_is_num(v.get("dx", 0.0)) and _is_num(v.get("dy", 0.0)), "dx, dy 는 숫자")
+    elif type_ == "heartbeat":
+        need(all(v.get(k) is None or _is_num(v[k]) for k in ("fps", "cpu", "cam1_fps", "cam2_fps")),
+             "fps, cpu, cam1_fps, cam2_fps 는 숫자")
+    elif type_ == "node_info":
+        pc = v.get("pc", {})
+        need(isinstance(pc, dict) and all(_is_scalar(x) for x in pc.values()),
+             "pc 는 문자열·숫자 값만")

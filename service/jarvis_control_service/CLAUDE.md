@@ -148,7 +148,7 @@ control ↔ camera_controller:
 
 | 방향 | type | value | 때 |
 | --- | --- | --- | --- |
-| ↓ | `pan_tilt` | `{"mode":"preset","seat":2}` | 추적 대상 변경 시. 각도는 control.yaml |
+| ↓ | `pan_tilt` | `{"mode":"preset","seat":2,"pan":80,"tilt":85}` | 추적 대상 변경 시. 각도는 control이 control.yaml에서 읽어 싣는다 |
 | ↓ | `pan_tilt` | `{"mode":"nudge","dpan":1.5,"dtilt":-0.8}` | `track_offset` 수신 시 (최대 10Hz) |
 | ↓ | `pan_tilt` | `{"mode":"home"}` | 대상 없을 때 |
 | ↑ | `pan_tilt_state` | `{"pan":95,"tilt":80,"ok":true}` | 명령 적용 후 (Serial `OK` 전달) |
