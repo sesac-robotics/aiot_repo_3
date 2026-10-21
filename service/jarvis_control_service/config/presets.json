@@ -1,0 +1,12 @@
+{
+  "limits": {"pan_min": 0, "pan_max": 180, "tilt_min": 30, "tilt_max": 140},
+  "home": {"pan": 81, "tilt": 90},
+  "seats": {
+    "1": {"pan": 60, "tilt": 85},
+    "2": {"pan": 80, "tilt": 85},
+    "3": {"pan": 100, "tilt": 85},
+    "4": {"pan": 120, "tilt": 85}
+  },
+  "control": {"kp": [18, 12], "direction": [1, -1], "initial_settle_seconds": 2.0},
+  "updated_at": 0.0
+}
