@@ -3,7 +3,8 @@ student_client_N 실행 파일 (학생 PC). VS Code에서 이 파일을 열고 R
 (control 서버는 먼저 service/jarvis_control_service/run_hub.py 로 켜 둔다)
 
 기본: 웹캠 판정 + control 전송 (monitor/seat_link_main.py 를 그대로 실행)
-  - 졸음·하품·전방 주시 미흡·앞으로 숙임을 판정해 condition_summary {"focus_low", "posture_bad"} 를 10초마다 보낸다
+  - 졸음·하품·전방 주시 미흡·앞으로 숙임·고개 기울임·어깨 비대칭을 판정해 condition_summary(개별 6개 + 묶음
+    focus_low·posture_bad)를 10초마다 보낸다 (monitor/condition.py)
   - fall_alert 가 오면 화면에 띄우고, f 또는 Enter 로 확인(fall_confirm)한다
   - 좌석 저장값이 없으면 시작할 때 바른 자세 10초 등록 → 방향 측정 (README 참고)
 --no-camera: 카메라 없이 연결·알림 흐름만 시험 (터미널에서 Enter 로 확인, 고정값 전송)
@@ -12,7 +13,7 @@ student_client_N 실행 파일 (학생 PC). VS Code에서 이 파일을 열고 R
   python3 run_client.py --seat 1                          # control IP·포트는 config/common.yaml
   python3 run_client.py --seat 1 --server 127.0.0.1       # 같은 PC에서 시험
   python3 run_client.py --seat 1 --rule --interval 5      # seat_link_main / monitor_main 옵션도 그대로 쓸 수 있다
-  python3 run_client.py --seat 1 --no-camera [--focus-low] [--posture-bad]
+  python3 run_client.py --seat 1 --no-camera [--on drowsy head_tilt ...]   # 개별 항목 고정 전송
 같은 좌석으로 두 개를 동시에 띄우면 control 이 먼저 붙은 쪽을 끊으므로 좌석당 하나만 실행한다.
 """
 
@@ -25,6 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))      # monitor/, seat_common/, seat_link/ (이 폴더)
 
+from monitor.condition import FIELDS, to_summary              # noqa: E402
 from seat_link.control_link import VALID_SEATS, StudentLink   # noqa: E402
 
 SEAT = 1                 # Run Code 로 실행할 때 좌석 번호 (옵션 --seat 가 있으면 그게 우선)
@@ -65,8 +67,8 @@ def run_test_node(argv: list):
     ap.add_argument("--seat", type=int, choices=VALID_SEATS, default=SEAT)
     ap.add_argument("--server", default=None, help="control IP (기본: config/common.yaml)")
     ap.add_argument("--port", type=int, default=None)
-    ap.add_argument("--focus-low", action="store_true", help="condition_summary 의 focus_low 를 true 로")
-    ap.add_argument("--posture-bad", action="store_true", help="condition_summary 의 posture_bad 를 true 로")
+    ap.add_argument("--on", nargs="*", default=[], choices=FIELDS,
+                    help="true 로 보낼 개별 항목 (예: --on drowsy head_tilt). 묶음 값은 여기서 계산")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -80,7 +82,7 @@ def run_test_node(argv: list):
 
     def summary_loop():
         while not stop.wait(SUMMARY_INTERVAL_S):
-            link.send_summary(args.focus_low, args.posture_bad)
+            link.send_summary(to_summary({k: True for k in args.on}))
 
     threading.Thread(target=summary_loop, daemon=True).start()
     try:
