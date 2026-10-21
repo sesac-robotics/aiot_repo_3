@@ -35,6 +35,10 @@ def build_parser():
                          "기본 v2 = 새 장소 포함 재학습 (10-21 테스트 구성)")
     ap.add_argument("--no-face-evidence", action="store_true",
                     help="눈 감김·입 벌림으로 졸음·하품을 확인하는 보정을 끔 (비교용)")
+    ap.add_argument("--stretch-min", type=float, default=50.0,
+                    help="이 시간(분) 이어서 앉아 있으면 스트레칭 권유 (SP-228). 시험할 때는 1")
+    ap.add_argument("--away-reset-sec", type=float, default=60.0,
+                    help="사람이 이 시간(초) 넘게 안 보이면 자리 비움으로 보고 착석 시간을 처음부터")
     ap.add_argument("--seat", type=int, default=1, help="좌석 번호 (기준값 저장 단위)")
     ap.add_argument("--register", action="store_true",
                     help="저장값이 있어도 바른 자세·방향을 새로 등록 (이후 학생 화면의 등록 버튼)")
