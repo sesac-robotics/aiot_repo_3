@@ -8,8 +8,8 @@ from __future__ import annotations
 import os
 import time
 
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QImage, QPixmap
+from PyQt6.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtNetwork import QHostAddress, QUdpSocket
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedLayout, QVBoxLayout, QWidget
 
@@ -23,26 +23,23 @@ except ImportError:                        # pragma: no cover
     HAS_MULTIMEDIA = False
 
 
-class LiveVideo(QLabel):
-    """UDP(헤더 16바이트 + JPEG)를 받아 그리는 위젯"""
+class UdpFrameSource(QObject):
+    """카메라 하나의 UDP 포트를 한 번만 연다 (헤더 16바이트 + JPEG, common/protocol.py VIDEO_HEADER).
 
-    def __init__(self, port: int, cam_id: int, title: str, parent=None):
+    같은 포트를 위젯마다 따로 열면 한쪽에만 영상이 가므로, 같은 카메라를 보는 화면
+    (cam2: 이벤트 창 · 시설 관리 각도 등록)은 이 수신기 하나를 같이 쓴다.
+    """
+    jpeg = pyqtSignal(bytes)                 # 받은 프레임 중 마지막 것 (JPEG)
+
+    def __init__(self, port: int, cam_id: int, parent=None):
         super().__init__(parent)
-        self.port, self.cam_id, self.title = port, cam_id, title
+        self.port, self.cam_id = port, cam_id
         self.last_frame_id = -1
         self.last_rx = 0.0
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(320, 200)
-        self.setStyleSheet("background:#1f2428; color:#9aa0a6; border-radius:8px;")
-        self._pix: QPixmap | None = None
         self.sock = QUdpSocket(self)
         self.bound = self.sock.bind(QHostAddress(QHostAddress.SpecialAddress.AnyIPv4), port,
                                     QUdpSocket.BindFlag.ShareAddress | QUdpSocket.BindFlag.ReuseAddressHint)
         self.sock.readyRead.connect(self._on_datagram)
-        self.watch = QTimer(self, interval=1000)
-        self.watch.timeout.connect(self._check_alive)
-        self.watch.start()
-        self._check_alive()
 
     def _on_datagram(self):
         latest = None
@@ -62,28 +59,60 @@ class LiveVideo(QLabel):
             self.last_frame_id = frame_id
             self.last_rx = now
             latest = data
-        # 한 번에 여러 장이 쌓였으면 마지막 것만, 화면에 보일 때만 그린다 (숨은 탭은 디코딩 안 함)
-        if latest is None or not self.isVisible():
+        if latest is not None:                   # 한 번에 여러 장이 쌓였으면 마지막 것만
+            self.jpeg.emit(latest[UDP_HEADER.size:])
+
+
+class LiveVideo(QLabel):
+    """UdpFrameSource의 영상을 그리는 위젯. 보일 때만 디코딩한다 (숨은 탭·창은 디코딩 안 함).
+    crosshair=True면 가운데 십자선 (팬틸트 각도 등록: 학생이 화면 가운데 오게 맞출 때)"""
+
+    def __init__(self, source: UdpFrameSource, title: str, crosshair: bool = False, parent=None):
+        super().__init__(parent)
+        self.source, self.title, self.crosshair = source, title, crosshair
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(320, 200)
+        self.setStyleSheet("background:#1f2428; color:#9aa0a6; border-radius:8px;")
+        self._pix: QPixmap | None = None
+        source.jpeg.connect(self._on_jpeg)
+        self.watch = QTimer(self, interval=1000)
+        self.watch.timeout.connect(self._check_alive)
+        self.watch.start()
+        self._check_alive()
+
+    def _on_jpeg(self, data: bytes):
+        if not self.isVisible():
             return
-        img = QImage.fromData(latest[UDP_HEADER.size:], "JPG")
+        img = QImage.fromData(data, "JPG")
         if not img.isNull():
             self._pix = QPixmap.fromImage(img)
             self._render()
 
     def _render(self):
-        if self._pix:
-            self.setPixmap(self._pix.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                            Qt.TransformationMode.SmoothTransformation))
+        if not self._pix:
+            return
+        pix = self._pix.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+        if self.crosshair:
+            p = QPainter(pix)
+            p.setPen(QPen(QColor(255, 255, 255, 190), 1))
+            cx, cy, r = pix.width() // 2, pix.height() // 2, min(pix.width(), pix.height()) // 10
+            p.drawLine(cx - r, cy, cx + r, cy)
+            p.drawLine(cx, cy - r, cx, cy + r)
+            p.drawEllipse(cx - r // 3, cy - r // 3, 2 * (r // 3), 2 * (r // 3))
+            p.end()
+        self.setPixmap(pix)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._render()
 
     def _check_alive(self):
-        if time.time() - self.last_rx > 2.0:
+        src = self.source
+        if time.time() - src.last_rx > 2.0:
             self._pix = None
             self.clear()
-            why = f"UDP :{self.port} 대기 중" if self.bound else f"UDP :{self.port} 열 수 없음 (다른 프로그램이 사용 중)"
+            why = f"UDP :{src.port} 대기 중" if src.bound else f"UDP :{src.port} 열 수 없음 (다른 프로그램이 사용 중)"
             self.setText(f"{self.title}\n영상 없음 — {why}")
 
 

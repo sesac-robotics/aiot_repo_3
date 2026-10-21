@@ -13,13 +13,13 @@ from common import protocol as P
 from . import theme as T
 from .home import card
 from .store import LAYOUT_NEIGHBORS, SEATS, Store, settings
-from .video import LiveVideo
+from .video import LiveVideo, UdpFrameSource
 
 DEVICE_ORDER = [P.CONTROL_NODE, P.VISION_NODE, T.PANTILT_NODE, P.CONSOLE_NODE, *P.STUDENT_NODES]
 
 
 class FacilityPage(QWidget):
-    def __init__(self, store: Store, send: Callable):
+    def __init__(self, store: Store, send: Callable, cam2: UdpFrameSource):
         super().__init__(objectName="page")
         self.store, self.send = store, send
         lay = QHBoxLayout(self)
@@ -39,10 +39,10 @@ class FacilityPage(QWidget):
         hh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         l1.addWidget(self.dev_table, 1)
-        lay.addWidget(f1, 5)
-
-        right = QVBoxLayout()
-        right.setSpacing(16)
+        # 왼쪽: 장비 상태 + 좌석 등록 / 오른쪽: 팬틸트 각도 등록 (영상을 크게 보며 맞춘다)
+        left = QVBoxLayout()
+        left.setSpacing(16)
+        left.addWidget(f1, 1)
 
         # ── 2. 좌석 · 장비 (보기만) ──
         f2, l2 = card("좌석 · 장비")
@@ -62,7 +62,8 @@ class FacilityPage(QWidget):
             self.seat_rows[s] = name
         grid.setColumnStretch(2, 1)
         l2.addLayout(grid)
-        right.addWidget(f2)
+        left.addWidget(f2)
+        lay.addLayout(left, 5)
 
         # ── 3. 팬틸트 각도 등록 ──
         f3, l3 = card("팬틸트 각도 등록")
@@ -70,6 +71,12 @@ class FacilityPage(QWidget):
                      "화각이 좁은 카메라도 빠르고 정확하게 움직이고, 좌석이 늘어도 각도만 추가하면 됩니다.",
                      objectName="muted", wordWrap=True)
         l3.addWidget(why)
+        # 각도는 팬틸트 카메라 영상을 보며 맞춘다. 이벤트 창과 같은 cam2 수신기를 같이 쓴다 (포트는 한 번만 열림)
+        self.pt_video = LiveVideo(cam2, title="팬틸트 카메라 (cam2)", crosshair=True)
+        self.pt_video.setMinimumSize(400, 300)
+        l3.addWidget(self.pt_video, 1)
+        l3.addWidget(QLabel("학생 얼굴이 십자선 가운데에 오도록 움직인 뒤 [현재 각도로 저장]을 누르세요.",
+                            objectName="muted", wordWrap=True))
         top = QHBoxLayout()
         self.pt_seat = QComboBox()
         for s in SEATS:
@@ -95,9 +102,7 @@ class FacilityPage(QWidget):
                             "범위: Pan 0~180°, Tilt 30~140°", objectName="muted", wordWrap=True))
         self.preset_state = QLabel()
         l3.addWidget(self.preset_state)
-        right.addWidget(f3)
-        right.addStretch(1)
-        lay.addLayout(right, 4)
+        lay.addWidget(f3, 5)
 
         store.devices_changed.connect(self.refresh_devices)
         store.seats_changed.connect(self.refresh_seats)
@@ -138,12 +143,12 @@ class FacilityPage(QWidget):
 class LivePage(QWidget):
     """[전체 화면] 탭: 고정 카메라 실시간 (화면 구성도 v3 '그림 추가 예정')"""
 
-    def __init__(self, port: int):
+    def __init__(self, cam1: UdpFrameSource):
         super().__init__(objectName="page")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 16, 16, 16)
         f, l = card("전체 화면 — 고정 카메라 실시간")
-        l.addWidget(LiveVideo(port, cam_id=1, title="고정 카메라 (cam1)"), 1)
+        l.addWidget(LiveVideo(cam1, title="고정 카메라 (cam1)"), 1)
         lay.addWidget(f)
 
 

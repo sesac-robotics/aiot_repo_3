@@ -20,7 +20,7 @@ from common import protocol as P
 
 from . import theme as T
 from .store import SEATS, Store
-from .video import ClipPlayer, LiveVideo
+from .video import ClipPlayer, LiveVideo, UdpFrameSource
 
 PAGE_SIZE = 50          # 로그 한 번에 최대 50건
 
@@ -163,7 +163,7 @@ class SeatMap(QWidget):
 class EventPanel(QWidget):
     closed = pyqtSignal()
 
-    def __init__(self, store: Store, send: Callable, logs: LogQueries, live_port: int, clip_root: str):
+    def __init__(self, store: Store, send: Callable, logs: LogQueries, cam2: UdpFrameSource, clip_root: str):
         super().__init__()
         self.store, self.send, self.logs = store, send, logs
         self.event_id = 0
@@ -181,7 +181,7 @@ class EventPanel(QWidget):
         lay.addLayout(top)
 
         self.video_stack = QStackedWidget()
-        self.live = LiveVideo(live_port, cam_id=2, title="팬틸트 카메라 실시간")
+        self.live = LiveVideo(cam2, title="팬틸트 카메라 실시간")
         self.clip = ClipPlayer(clip_root)
         # Control 에 녹화 요청 메시지가 아직 없다 → 바로 '녹화 없음'으로 답한다
         self.clip.request_clip.connect(lambda eid: self.clip.on_clip_info({"event_id": eid, "status": "none"}))
@@ -585,7 +585,7 @@ class StatsPanel(QWidget):
 
 # ── 홈 페이지 ──────────────────────────────────────────────
 class HomePage(QWidget):
-    def __init__(self, store: Store, send: Callable, logs: LogQueries, live_port: int, clip_root: str):
+    def __init__(self, store: Store, send: Callable, logs: LogQueries, cam2: UdpFrameSource, clip_root: str):
         super().__init__(objectName="page")
         self.store = store
         lay = QHBoxLayout(self)
@@ -594,7 +594,7 @@ class HomePage(QWidget):
 
         self.seat_area = QStackedWidget()         # 좌석도 자리
         self.seat_map = SeatMap(store)
-        self.event_panel = EventPanel(store, send, logs, live_port, clip_root)
+        self.event_panel = EventPanel(store, send, logs, cam2, clip_root)
         self.student_panel = StudentPanel(store, logs)
         for w in (self.seat_map, self.event_panel, self.student_panel):
             self.seat_area.addWidget(w)
