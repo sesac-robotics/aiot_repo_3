@@ -23,11 +23,15 @@ RULES = {
     "drowsy": Rule("focus", "졸린가요? 눈을 크게 깜빡이고 숨을 한 번 크게 쉬어 볼까요?", 5, 120),
     "yawn": Rule("focus", "피곤해 보여요. 물 한 잔 어때요?", 5, 120),
     "not_forward": Rule("focus", "화면으로 다시 돌아와 볼까요?", 5, 60),
-    # 자세 (종류별 문구는 SP-226에서 나눈다)
-    "posture": Rule("posture", "허리를 펴고 어깨를 내려 볼까요?", 5, 120),
+    # 자세 (SP-226). 학습 모델: forward_lean·head_tilt·shoulder_tilt / 규칙 모드(--rule): forward_head·slouch도 나옴
+    "forward_lean": Rule("posture", "몸이 화면 쪽으로 숙여졌어요. 허리를 펴고 등을 의자에 붙여 볼까요?", 5, 120),
+    "head_tilt": Rule("posture", "고개가 한쪽으로 기울었어요. 고개를 바로 세워 볼까요?", 5, 120),
+    "shoulder_tilt": Rule("posture", "어깨 높이가 달라요. 양쪽 어깨를 나란히 내려 볼까요?", 5, 120),
 }
+RULES["forward_head"] = RULES["slouch"] = RULES["forward_lean"]     # 규칙 모드 이름 → 앞으로 숙임 문구
 
-PRIORITY = ("drowsy", "not_forward", "yawn", "posture")      # 앞일수록 먼저. 표에 없으면 맨 뒤
+PRIORITY = ("drowsy", "not_forward", "yawn",                  # 앞일수록 먼저. 표에 없으면 맨 뒤
+            "forward_lean", "forward_head", "slouch", "head_tilt", "shoulder_tilt")
 
 COLORS = {              # 분류 → 팝업 배경 (Qt 스타일시트는 #RGBA를 못 읽으므로 rgba())
     "focus": "rgba(172, 107, 8, 215)",

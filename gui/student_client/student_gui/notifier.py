@@ -52,9 +52,7 @@ class Notifier(QLabel):
         if not state.get("present") or state.get("calibrating"):
             self._prev = set()
             return
-        now_set = {k for k in state.get("face", ()) if rule(k)}
-        if state.get("posture"):
-            now_set.add("posture")
+        now_set = {k for k in (*state.get("face", ()), *state.get("posture", ())) if rule(k)}
         fresh = [k for k in now_set - self._prev if not self._cooling(k)]
         if fresh:
             self.notify(min(fresh, key=priority))
