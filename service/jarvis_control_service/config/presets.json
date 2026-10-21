@@ -33,8 +33,8 @@
       12
     ],
     "direction": [
-      1,
-      -1
+      -1,
+      1
     ],
     "initial_settle_seconds": 2.0
   },
