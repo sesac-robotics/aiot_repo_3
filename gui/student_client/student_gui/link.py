@@ -1,7 +1,8 @@
 """Control 연결: 팀 공용 NodeClient를 Qt 시그널로 감싼다 (통신 형식은 common/에만 있음)
 
 - 받음: fall_alert {target_seat, stage}, fall_alert_cancel {target_seat}
-- 보냄: fall_confirm {target_seat}, condition_summary {focus_low, posture_bad} (10초마다)
+- 보냄: fall_confirm {target_seat}, condition_summary (10초마다): 묶음 focus_low·posture_bad +
+  개별 drowsy·yawn·not_forward·forward_lean·head_tilt·shoulder_tilt (값은 monitor/condition.py to_summary)
 - event_id: Control이 fall_alert에 event_id를 실어 보내면 fall_confirm에 그대로 돌려준다 (지금 hub는 안 보냄).
   끊긴 동안 쌓였다 늦게 간 확인이 같은 자리의 '새' 쓰러짐을 확인하지 않게 Control이 가려낼 수 있도록.
 - 자리 등록(seat_register)은 Interface Spec v1.1에 정의됐지만 아직 common/protocol.py에 없다.

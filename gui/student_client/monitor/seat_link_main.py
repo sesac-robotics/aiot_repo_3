@@ -5,7 +5,8 @@ student_client 폴더에서 실행 (control 서버는 먼저 service/jarvis_cont
   python -m monitor.seat_link_main --seat 1 --server 127.0.0.1    # 같은 PC에서 시험할 때
 monitor.monitor_main의 옵션(--rule, --img-every 등)도 그대로 쓸 수 있다.
 판정은 monitor_main.Monitor를 그대로 쓰고, 전송은 seat_link/control_link.py(바이너리 프레임 v3, common/protocol.py)가 맡는다.
-  - 보내는 값: {"focus_low": 졸음·하품·전방 주시 미흡 중 하나라도, "posture_bad": 앞으로 숙임} (monitor/condition.py to_summary)
+  - 보내는 값: 개별 6개(졸음·하품·전방 주시 미흡·앞으로 숙임·고개 기울임·어깨 비대칭) + 묶음 focus_low·posture_bad
+    (monitor/condition.py to_summary)
   - 쓰러짐 알림(fall_alert)이 오면 화면에 띄우고, f 또는 Enter 로 확인(fall_confirm)한다
 키: c 기준 자세 다시 저장, z 영역 다시 측정, Space 영역 측정 시작, f/Enter 쓰러짐 알림 확인, ESC 종료
 """
@@ -23,7 +24,8 @@ from monitor.monitor_main import Monitor
 from seat_common.korean_text import TextRenderer
 from seat_link.control_link import VALID_SEATS, StudentLink
 
-ON_KO = {"drowsy": "졸음", "yawn": "하품", "not_forward": "전방 주시 미흡", "forward_lean": "앞으로 숙임"}
+ON_KO = {"drowsy": "졸음", "yawn": "하품", "not_forward": "전방 주시 미흡", "forward_lean": "앞으로 숙임",
+         "head_tilt": "고개 기울임", "shoulder_tilt": "어깨 비대칭"}
 STAGE_KO = {"neighbor": "옆자리", "all": "전체"}
 CONFIRM_KEYS = (ord("f"), 13, 10)                   # f, Enter
 
@@ -86,7 +88,7 @@ def main():
             latch.update(monitor.state)
             if now - t_send >= link_opt.interval:
                 last = latch.snapshot()
-                link.send_summary(**to_summary(last))
+                link.send_summary(to_summary(last))
                 t_send = now
             lines.extend(link_lines(link, last))
             lines.append((f"c: 기준 자세 다시 저장  |  z: 영역 다시 측정  |  f/Enter: 알림 확인  |  ESC: 종료  |  {fps:.0f} fps",

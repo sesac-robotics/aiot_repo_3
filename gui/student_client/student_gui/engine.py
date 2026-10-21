@@ -6,7 +6,7 @@
 - 영상은 화면에만 보여 주고 저장하지 않는다 (SR_006).
 - 자리 등록: register() → Monitor.register() (바른 자세 10초). 영역 측정값이 없으면 Monitor가 이어서
   영역 측정을 시작하고, 학생은 [다음] 버튼(= Space 키)으로 영역마다 진행한다.
-- 10초 요약: 그동안 한 번이라도 확정된 문제가 있으면 True (monitor/condition.py와 같은 방식).
+- 10초 요약: monitor/condition.py 의 ConditionLatch 로 모은다 (그동안 한 번이라도 확정되면 True, 개별 6개 + 묶음 2개).
 """
 import queue
 import time
@@ -15,9 +15,9 @@ import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QImage
 
+from monitor.condition import ConditionLatch, to_summary
 from monitor.monitor_main import Monitor
 
-FOCUS_KEYS = {"drowsy", "yawn", "not_forward"}        # 집중 저하로 세는 얼굴 문제
 REOPEN_AFTER = 25                                     # 연속 25번(약 5초) 못 읽으면 카메라를 다시 연다
 
 
@@ -36,7 +36,7 @@ class Engine(QThread):
         self.cam_ok = False
         self.fps = 0.0
         self._running = True
-        self._latch = {"focus_low": False, "posture_bad": False}
+        self._latch = ConditionLatch()
 
     # ---- GUI 쪽에서 부르는 함수 (어느 스레드에서 불러도 안전) ----------------
     def register(self):
@@ -50,9 +50,8 @@ class Engine(QThread):
         self.wait(3000)
 
     def take_summary(self) -> dict:
-        """10초마다 app이 가져감. 가져가면 다시 False부터 모은다"""
-        out, self._latch = self._latch, {"focus_low": False, "posture_bad": False}
-        return out
+        """10초마다 app이 가져감 → condition_summary 값. 가져가면 다시 False부터 모은다"""
+        return to_summary(self._latch.snapshot())
 
     # ---- 판정 스레드 --------------------------------------------------------
     def _connect(self, monitor):
@@ -108,10 +107,7 @@ class Engine(QThread):
                 monitor.next_zone(now)
 
     def _publish(self, state, lines, frame, zone_step):
-        face, posture = set(state.get("face", ())), set(state.get("posture", ()))
-        if state.get("present") and not state.get("calibrating"):
-            self._latch["focus_low"] |= bool(FOCUS_KEYS & face)
-            self._latch["posture_bad"] |= bool(posture)
+        self._latch.update(state)
         guide = [text for text, _ in lines] if state.get("calibrating") else []
         self.state_ready.emit({**state, "guide": guide, "zone_step": zone_step})
         frame = cv2.flip(frame, 1)                     # 거울처럼 보이게 (판정은 원본으로 이미 끝남)
