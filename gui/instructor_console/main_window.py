@@ -14,6 +14,7 @@ from .facility import FacilityPage, LivePage, SettingsDialog
 from .home import HomePage, LogQueries
 from .net import ControlLink
 from .store import Store
+from .video import UdpFrameSource
 
 
 class MainWindow(QMainWindow):
@@ -65,9 +66,12 @@ class MainWindow(QMainWindow):
 
         # ── 페이지 ──
         self.pages = QStackedWidget()
-        self.home = HomePage(self.store, send, self.logs, cam2_port, clip_root)
-        self.live = LivePage(cam1_port)
-        self.facility = FacilityPage(self.store, send)
+        # 카메라마다 UDP 포트는 한 번만 연다. cam2는 이벤트 창과 시설 관리(각도 등록)가 같이 본다
+        self.cam1 = UdpFrameSource(cam1_port, cam_id=1, parent=self)
+        self.cam2 = UdpFrameSource(cam2_port, cam_id=2, parent=self)
+        self.home = HomePage(self.store, send, self.logs, self.cam2, clip_root)
+        self.live = LivePage(self.cam1)
+        self.facility = FacilityPage(self.store, send, self.cam2)
         for p in (self.home, self.live, self.facility):
             self.pages.addWidget(p)
 
