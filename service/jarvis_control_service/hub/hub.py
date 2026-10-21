@@ -15,10 +15,12 @@ control(hub) TCP 서버 (상세 설계 0·5·6장)
 - 학생 노드 수신 기록 (로거 "hub.student"): condition_summary·fall_confirm 을 받을 때마다 "수신 OK",
   형식이 틀려 버린 메시지는 "수신 실패", fall_alert 를 보내면 "전송 OK".
   접속 중인데 condition_summary 가 30초 없으면 경고하고, 1분마다 좌석별 수신 현황을 한 줄로 남긴다.
+- 카메라 영상: camera_streamer 의 UDP(6001/6002)를 저장하지 않고 instructor_console(5011/5012)로 넘긴다
+  (hub/video_relay.py). --no-video 면 끈다.
 - 로그는 화면과 logs/hub.log (5MB × 5개 순환) 에 같이 남는다. 학생 수신만 보려면: grep hub.student logs/hub.log
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m hub [--host 0.0.0.0] [--port 5000] [--db 경로] [--log-file 경로] [-v]
-                                                 [--pantilt-port auto|/dev/ttyACM0] [--pantilt-sim]
+                                                 [--pantilt-port auto|/dev/ttyACM0] [--pantilt-sim] [--no-video]
 """
 
 import argparse
@@ -36,6 +38,7 @@ from hub.control_config import DB_PATH, SERVICE_DIR, ConfigError, load_control_c
 from hub.db import Database, SchemaMismatch
 from hub.event_manager import PANTILT, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT 추가
 from hub.pantilt import PanTiltService                                    # [팬틸트]
+from hub.video_relay import VideoRelay
 
 log = logging.getLogger("hub")
 slog = logging.getLogger("hub.student")      # 학생 노드 수신·송신 기록 (grep hub.student)
@@ -68,7 +71,8 @@ class NodeConn:
 
 class HubServer:
     def __init__(self, host: str, port: int, db_path, control_cfg: dict | None = None,
-                 pantilt_port: str | None = None, pantilt_sim: bool = False):   # [팬틸트] 인자 2개 추가
+                 pantilt_port: str | None = None, pantilt_sim: bool = False,   # [팬틸트] 인자 2개 추가
+                 video: bool = True):
         self.host, self.port = host, port
         self.db_path = db_path
         self.db = Database(db_path)
@@ -85,6 +89,7 @@ class HubServer:
         self.pantilt: PanTiltService | None = None                                        # [팬틸트]
         self.pantilt_port = pantilt_port or cfg.get("pantilt", {}).get("port", "auto")   # [팬틸트] control.yaml pantilt.port
         self.pantilt_sim = pantilt_sim                                                    # [팬틸트]
+        self.video = VideoRelay(host, self.console_ip) if video else None   # 영상: streamer -> Console 중계
         self.loop: asyncio.AbstractEventLoop | None = None                               # [팬틸트]
         self._last_report = time.time()
         self._report_counts: dict[str, int] = {}    # 지난 현황 요약 때의 summary_count
@@ -250,6 +255,13 @@ class HubServer:
             log.exception("%s 메시지 처리 중 오류 - 이 메시지만 버림: %s", node_name, msg)
         return node_name
 
+    def console_ip(self) -> str | None:
+        """영상을 보낼 instructor_console 의 IP (TCP 접속 주소). 접속 중이 아니면 None."""
+        conn = self.nodes.get(CONSOLE_NODE)
+        if not conn or not conn.online or ":" not in conn.peer:
+            return None
+        return conn.peer.rsplit(":", 1)[0]
+
     async def on_connect(self, node: str, now: float):
         if node in STUDENT_NODES:
             self._report_counts[node] = 0
@@ -402,6 +414,8 @@ class HubServer:
         await self.apply(self.events.start(time.time()))                          # [팬틸트] 복구된 사건 좌석으로
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         log.info("control 서버 시작: %s:%d (DB: %s)", self.host, self.port, self.db_path)
+        if self.video:
+            await self.video.start()
         tasks = [asyncio.create_task(self.heartbeat_watchdog()),
                  asyncio.create_task(self.tick_loop())]
         try:
@@ -411,6 +425,8 @@ class HubServer:
             for t in tasks:
                 t.cancel()
             self.pantilt.close()                                                  # [팬틸트] 정지 + LED 끔
+            if self.video:
+                self.video.close()
             self.db.close()
 
 
@@ -445,13 +461,15 @@ def main():
     ap.add_argument("--pantilt-port", default=None,                                    # [팬틸트]
                     help="Uno 시리얼 포트 (기본: control.yaml pantilt.port, 없으면 auto)")
     ap.add_argument("--pantilt-sim", action="store_true", help="Uno 없이 모의 팬틸트")  # [팬틸트]
+    ap.add_argument("--no-video", action="store_true", help="카메라 영상 중계(UDP 6001/6002) 끄기")
     args = ap.parse_args()
     port = args.port or int(load_config().get("control_port", DEFAULT_PORT))
 
     setup_logging(logging.DEBUG if args.verbose else logging.INFO, args.log_file)
     try:
         server = HubServer(args.host, port, args.db,
-                           pantilt_port=args.pantilt_port, pantilt_sim=args.pantilt_sim)   # [팬틸트]
+                           pantilt_port=args.pantilt_port, pantilt_sim=args.pantilt_sim,   # [팬틸트]
+                           video=not args.no_video)
     except (SchemaMismatch, ConfigError) as e:
         log.error("%s", e)
         raise SystemExit(1)

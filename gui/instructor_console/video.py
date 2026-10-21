@@ -1,14 +1,11 @@
-"""영상 위젯 — 실시간(UDP, IF-01 형식)과 녹화 다시 보기(event_clip 파일)
+"""영상 위젯 — 실시간(UDP)과 녹화 다시 보기(event_clip 파일)
 
-⚠ 실시간 영상을 Console이 어디서 받는지는 Interface Spec v1.1에 아직 없다.
-  cam2 :5002는 Vision Service가 이미 받고 있어서 같은 포트를 Console이 또 열 수 없다.
-  여기서는 IF-01과 같은 패킷 형식을 '별도 포트'(기본 cam1 5011, cam2 5012)로 받도록 만들어 두었다.
-  Camera Streamer가 두 곳으로 보내거나 Vision이 중계하도록 규격을 정하면 포트만 맞추면 된다.
+실시간 영상: camera_streamer -> control(hub) -> 이 화면. hub 가 저장하지 않고 그대로 넘겨 준다.
+형식·포트는 common/protocol.py 의 VIDEO_HEADER / CONSOLE_VIDEO_PORTS (cam1 5011, cam2 5012).
 """
 from __future__ import annotations
 
 import os
-import struct
 import time
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
@@ -16,7 +13,7 @@ from PyQt6.QtGui import QDesktopServices, QImage, QPixmap
 from PyQt6.QtNetwork import QHostAddress, QUdpSocket
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedLayout, QVBoxLayout, QWidget
 
-UDP_HEADER = struct.Struct(">B3xId")     # cam_id, 예약 3바이트, frame_id, captured_at (16바이트)
+from common.protocol import VIDEO_HEADER as UDP_HEADER   # cam_id, 예약 3바이트, frame_id, captured_at (16바이트)
 
 try:                                       # QtMultimedia가 없는 환경에서도 화면은 뜨게
     from PyQt6.QtMultimedia import QMediaPlayer
@@ -27,7 +24,7 @@ except ImportError:                        # pragma: no cover
 
 
 class LiveVideo(QLabel):
-    """IF-01 형식 UDP(헤더 16바이트 + JPEG)를 받아 그리는 위젯"""
+    """UDP(헤더 16바이트 + JPEG)를 받아 그리는 위젯"""
 
     def __init__(self, port: int, cam_id: int, title: str, parent=None):
         super().__init__(parent)

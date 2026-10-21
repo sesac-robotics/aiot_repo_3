@@ -143,6 +143,20 @@ CODE_TYPES = {v: k for k, v in TYPE_CODES.items()}
 assert set(NODE_CODES) == VALID_NODES and len(CODE_NODES) == len(NODE_CODES), "NODE_CODES 를 노드 목록과 맞춘다"
 assert set(TYPE_CODES) == VALID_TYPES and len(CODE_TYPES) == len(TYPE_CODES), "TYPE_CODES 를 메시지 종류와 맞춘다"
 
+# ---- 카메라 영상 (UDP. 위 TCP 프레임과 별개) -----------------------------------
+# camera_streamer -> control(hub) -> instructor_console. hub 는 저장하지 않고 그대로 넘긴다.
+# 데이터그램 하나 = 헤더 16바이트 + JPEG 한 장 (빅엔디언)
+#   0      cam_id       uint8     1 고정 카메라, 2 팬틸트 카메라
+#   1-3    (예약)        3바이트   0
+#   4-7    frame_id     uint32    카메라별 일련번호 (순서가 뒤집힌 옛 프레임을 버리는 데 씀)
+#   8-15   captured_at  float64   촬영 시각 (보낸 PC 시계)
+VIDEO_HEADER = struct.Struct(">B3xId")
+VIDEO_CAMS = (1, 2)
+VIDEO_PORTS = {1: 6001, 2: 6002}              # streamer -> hub (hub 가 받는 포트)
+CONSOLE_VIDEO_PORTS = {1: 5011, 2: 5012}      # hub -> instructor_console (Console 이 받는 포트)
+VIDEO_MAX_DATAGRAM = 65507                    # UDP(IPv4) 데이터그램 최대 크기
+VIDEO_MAX_JPEG = VIDEO_MAX_DATAGRAM - VIDEO_HEADER.size
+
 MAGIC = b"\xAA\x55"
 _HEADER = struct.Struct(">2sBBBBIdfI")         # magic, version, node, type, seat, seq, ts, conf, length
 HEADER_SIZE = _HEADER.size                     # 26
