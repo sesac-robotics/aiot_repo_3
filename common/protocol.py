@@ -107,7 +107,9 @@ REPORT_TYPES = {"report_request",                        # ↑ console: [수업 
                 "report",                                # ↓ console: {report_id, status: writing|done, date, generated_at,
                                                          #     data, summary, suggestions, mode, took_s, fallback}
                 "report_write",                          # ↓ vision: 숫자를 주고 문장 작성 요청 {report_id, data, now}
-                "report_text"}                           # ↑ vision: {report_id, summary, suggestions, mode, took_s, fallback}
+                "report_text",                           # ↑ vision: {report_id, summary, suggestions, mode, took_s, fallback}
+                "view_request",                          # ↑ console: [수동보기] {seat: 1~4 | null(원위치)}
+                "view_state"}                            # ↓ console: [수동보기] {seat, until, by} (seat null = 끝, why)
 # control <-> student_client_N
 STUDENT_TYPES = {"fall_alert", "fall_alert_cancel",      # ↓
                  "fall_confirm", "condition_summary",    # ↑
@@ -166,6 +168,7 @@ TYPE_CODES = {
     "ask": 0x4E, "ask_answer": 0x4F,                                         # [질의]
     # [리포트] 0x6_ (console 0x4_ 칸이 다 차서 새 칸)
     "report_request": 0x60, "report": 0x61, "report_write": 0x62, "report_text": 0x63,
+    "view_request": 0x64, "view_state": 0x65,                               # [수동보기]
     # student 0x5_
     "fall_alert": 0x50, "fall_alert_cancel": 0x51, "fall_confirm": 0x52, "condition_summary": 0x53,
     "seat_register": 0x54,
@@ -455,6 +458,10 @@ def _check_value(type_: str, v: dict):
     elif type_ in ("ask_request", "ask_answer"):                            # [질의]
         need(_is_int(v.get("ask_id")), "ask_id 는 정수")
         need(isinstance(v.get("text"), str), "text 는 문자열")
+    elif type_ == "view_request":                                           # [수동보기]
+        need(v.get("seat") is None or (v["seat"] in VALID_SEATS and _is_int(v["seat"])), "seat 은 좌석 번호 또는 null")
+    elif type_ == "view_state":
+        pass
     elif type_ in REPORT_TYPES:                                             # [리포트]
         need(_is_int(v.get("report_id")), "report_id 는 정수")
         if type_ == "report_text":

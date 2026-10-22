@@ -3,7 +3,8 @@
 - 질문 → Control 에 ask {ask_id, text} → (vision LLM ⇄ control 도구) → ask_answer {ask_id, text, mode, tools, took_s, fallback}
 - [수업 종료 리포트] → report_request {report_id} → report {status: writing → done}
   리포트 카드의 [리포트 열기] 를 누르면 좌석도 자리에 ⑥ 리포트 화면이 열린다 (home.py).
-- 조회만 한다. 학생은 좌석 번호로만 답한다 (이름은 vision·control 이 다루지 않음).
+- 조회 + [수동보기] "1번 좌석 보여줘" (팬틸트로 좌석 비추기, 이벤트 추적 중이면 거절, 60초 뒤 원위치).
+  학생은 좌석 번호로만 답한다 (이름은 vision·control 이 다루지 않음).
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ REPORT_TIMEOUT_MS = 60_000
 
 QUICK = ["지금 대기 중인 요청?", "오늘 평균 확인 시간"]
 TOOL_LABEL = {"get_open_events": "열린 이벤트", "search_events": "이벤트 검색", "get_event_timeline": "처리 과정",
-              "get_stats": "통계", "get_device_status": "장비 상태", "get_class_condition": "반 평균"}
+              "get_stats": "통계", "get_device_status": "장비 상태", "get_class_condition": "반 평균",
+              "look_at_seat": "카메라", "camera_home": "카메라"}
 ARG_LABEL = {"fall": "쓰러짐", "question": "질문", "away": "자리비움", "today": "오늘", "false_alarm": "오감지",
              "resolved": "완료", "open": "처리 중", "closed": "종료", "unconfirmed": "미확인"}
 MODE_LABEL = {"gemini": "Gemini", "ollama": "Ollama", "rule": "정해진 답", "default": "답 못 함",
@@ -61,7 +63,9 @@ class _Bubble(QLabel):
 
 
 class AnswerCard(QFrame):
-    """AI 답 카드: 본문 + 근거 칩 + 모델·시간. 답이 오기 전엔 '확인하는 중'."""
+    """AI 답 카드: 본문 + 근거 칩 + 모델·시간. 답이 오기 전엔 '확인하는 중'.
+    [수동보기] 카메라를 돌렸으면 [원위치] 버튼."""
+    home_clicked = pyqtSignal()
 
     def __init__(self):
         super().__init__(objectName="askA")
@@ -94,6 +98,10 @@ class AnswerCard(QFrame):
             chip.setToolTip(str(t.get("args") or {}))
             self.chips.addWidget(chip)
         self.chips.addStretch(1)
+        if any(t.get("name") == "look_at_seat" and t.get("ok") for t in tools):    # [수동보기]
+            self.home_btn = QPushButton("원위치", objectName="chipBtn")
+            self.home_btn.clicked.connect(self.home_clicked)
+            self.chips.addWidget(self.home_btn)
         self.chips.addWidget(QLabel(mode_text(m), objectName="muted"))
         reasons = m.get("fallback") or []
         if reasons and m.get("mode") not in ("gemini", "rule"):
@@ -159,6 +167,7 @@ class ReportCard(QFrame):
 class AssistantPanel(QWidget):
     open_report = pyqtSignal(int)        # report_id → 좌석도 자리에 리포트
     save_report_pdf = pyqtSignal(int)
+    camera_home = pyqtSignal()           # [수동보기] 답 카드의 [원위치]
 
     def __init__(self, send: Callable[[str, dict], bool]):
         super().__init__()
@@ -177,7 +186,7 @@ class AssistantPanel(QWidget):
         head = QHBoxLayout()
         head.addWidget(QLabel("AI 조교에게 묻기", objectName="cardTitle"))
         head.addStretch(1)
-        head.addWidget(QLabel("조회만 · 좌석 번호로 답함", objectName="muted"))
+        head.addWidget(QLabel("조회 · 카메라 돌리기 · 좌석 번호로 답함", objectName="muted"))
         lay.addLayout(head)
 
         self.scroll = QScrollArea(widgetResizable=True)
@@ -189,7 +198,7 @@ class AssistantPanel(QWidget):
         self.msgs.setContentsMargins(0, 0, 4, 0)
         self.msgs.setSpacing(8)
         self.msgs.addStretch(1)                       # 대화는 아래에서부터 쌓인다
-        self.hint = QLabel("예) 오늘 쓰러짐 몇 번 있었어? · 3번 좌석 오늘 기록 · 장비 다 연결돼 있어?",
+        self.hint = QLabel("예) 오늘 쓰러짐 몇 번 있었어? · 3번 좌석 오늘 기록 · 1번 좌석 보여줘",
                            objectName="muted", wordWrap=True)
         self.msgs.addWidget(self.hint)
         self.scroll.setWidget(inner)
@@ -241,6 +250,7 @@ class AssistantPanel(QWidget):
         ask_id = next(_ids)
         self._add(_Bubble(text), right=True)
         card = AnswerCard()
+        card.home_clicked.connect(self.camera_home)
         self.answers[ask_id] = card
         self._add(card)
         if not self.send("ask", {"ask_id": ask_id, "text": text}):
@@ -259,6 +269,15 @@ class AssistantPanel(QWidget):
             card.set_answer(m)
             QTimer.singleShot(30, lambda: self.scroll.verticalScrollBar().setValue(
                 self.scroll.verticalScrollBar().maximum()))
+
+    def on_view_state(self, m: dict):
+        """[수동보기] 끝나면 답 카드의 [원위치] 버튼을 끈다."""
+        if m.get("seat") is None:
+            for card in self.findChildren(AnswerCard):
+                b = getattr(card, "home_btn", None)
+                if b is not None:
+                    b.setEnabled(False)
+                    b.setText("원위치됨")
 
     # ── 리포트 ──
     def request_report(self):

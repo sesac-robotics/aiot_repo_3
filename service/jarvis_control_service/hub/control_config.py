@@ -38,6 +38,7 @@ CONTROL_DEFAULTS = {
         "question_expire_s": 180,
         "away_alert_s": 60,
         "class_condition_s": 10,
+        "view_hold_s": 60,         # [수동보기] 강사가 고른 좌석을 비추는 시간
     },
     "track": {"nudge_max_hz": 10, "nudge_gain": 8.0},
     "clips": {                     # 이벤트 녹화 (Data Structure v2 4장)

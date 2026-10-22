@@ -1,7 +1,7 @@
 """
 event_manager 단위 테스트 (상세 설계 9장 "단위"): 가짜 시계로 사건을 순서대로 넣는다.
 확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 팬틸트 연동(preset/home/track, gen),
-      녹화 구간(확정 ~ 종료), [알림문구] 상황별 explain_request·늦은 응답 거르기
+      녹화 구간(확정 ~ 종료), [수동보기] 좌석 보기, [알림문구] 상황별 explain_request·늦은 응답 거르기
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m unittest tools.test_event_manager -v
 """
@@ -359,6 +359,63 @@ class ExplainSituationTest(unittest.TestCase):                           # [알�
         self.start("question", 2, 0)
         fx = self.m.on_explain_text(1, "문구", "default", T0 + 1)
         self.assertEqual(sends(fx, "event_update")[0].value["explain_text"], "문구")
+
+
+
+class ManualViewTest(unittest.TestCase):                                 # [수동보기]
+    """강사 "1번 좌석 보여줘": 이벤트 없을 때만, 60초 뒤 원위치, 새 이벤트가 오면 넘김."""
+
+    def setUp(self):
+        self.m = EventManager(copy.deepcopy(CONTROL_DEFAULTS))
+        self.C = "instructor_console"
+
+    def test_view_when_idle_moves_without_led(self):
+        fx, r = self.m.on_view_request(1, T0, self.C)
+        self.assertEqual((r["ok"], r["seat"], r["hold_s"]), (True, 1, 60.0))
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 1, "seat": 1, "kind": 0})       # LED 끔
+        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 1, "gen": 1})
+        self.assertEqual(sends(fx, "view_state")[0].value["seat"], 1)
+        self.assertEqual(sends(fx, "explain_request"), [])                    # 이벤트 아님
+        self.assertEqual(fx.saves, [])                                        # DB 이벤트 아님
+
+    def test_refused_while_tracking(self):
+        self.m.on_incident("question", 2, "start", T0)
+        fx, r = self.m.on_view_request(1, T0 + 1, self.C)
+        self.assertEqual((r["ok"], r["reason"], r["tracking"]["seat"]), (False, "tracking", 2))
+        self.assertFalse(fx)                                                  # 아무것도 안 움직임
+
+    def test_timeout_goes_home(self):
+        self.m.on_view_request(3, T0, self.C)
+        self.assertEqual(sends(self.m.tick(T0 + 59), "home", PT), [])
+        fx = self.m.tick(T0 + 60)
+        self.assertEqual(len(sends(fx, "home", PT)), 1)
+        self.assertEqual(sends(fx, "view_state")[0].value["why"], "timeout")
+        self.assertIsNone(self.m.view)
+
+    def test_new_event_takes_over(self):
+        self.m.on_view_request(1, T0, self.C)
+        fx = self.m.on_incident("fall", 4, "start", T0 + 5)
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 2, "seat": 4, "kind": 1})
+        self.assertEqual(sends(fx, "view_state")[0].value["why"], "event")
+        self.assertIsNone(self.m.view)
+        self.m.on_resolve(1, T0 + 10, self.C)                                 # 이벤트가 끝나도 수동 보기로 안 돌아감
+        self.assertIsNone(self.m.view)
+
+    def test_home_request_and_repeat(self):
+        self.m.on_view_request(1, T0, self.C)
+        fx, r = self.m.on_view_request(2, T0 + 10, self.C)                    # 다른 좌석으로 바꾸기
+        self.assertEqual(sends(fx, "preset", PT)[0].value["seat"], 2)
+        self.assertEqual(self.m.view["until"], T0 + 70)
+        fx, r = self.m.on_view_request(None, T0 + 20, self.C)                 # 원위치
+        self.assertTrue(r["home"])
+        self.assertEqual(len(sends(fx, "home", PT)), 1)
+        fx, r = self.m.on_view_request(None, T0 + 21, self.C)                 # 이미 원위치
+        self.assertFalse(fx)
+
+    def test_bad_seat_and_pantilt_safe(self):
+        self.assertEqual(self.m.on_view_request(9, T0, self.C)[1]["reason"], "bad_seat")
+        self.m.on_pantilt_state({"state": 7, "pan": 0, "tilt": 0, "gen": 0, "error": 1}, T0)
+        self.assertEqual(self.m.on_view_request(1, T0, self.C)[1]["reason"], "pantilt_off")
 
 
 if __name__ == "__main__":

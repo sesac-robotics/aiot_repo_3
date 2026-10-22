@@ -1,5 +1,5 @@
 """
-[질의] 강사 자연어 질의 + LLM tool calling (기능 2). 1차는 조회만 한다.
+[질의] 강사 자연어 질의 + LLM tool calling (기능 2). 조회 + [수동보기] 팬틸트로 좌석 비추기.
 
 흐름:
     강사 화면 --ask--> control --ask_request {ask_id, text, now}--> vision_service (여기)
@@ -78,8 +78,23 @@ TOOL_DECLS = [
         "parameters": {"type": "object", "properties": {
             "minutes": {"type": "integer", "description": "최근 몇 분 (1~240, 기본 30)"}}},
     },
+    # ---- [수동보기] 카메라를 움직이는 도구 (조회가 아님. 판단은 control event_manager) ----
+    {
+        "name": "look_at_seat",
+        "description": "팬틸트 카메라로 좌석을 비춘다 (강사 화면에 실시간 영상이 열림, 60초 뒤 원위치). "
+                       "도움 요청 이벤트를 추적 중이면 control 이 거절한다(ok=false, reason=tracking). "
+                       "'N번 보여줘', 'N번 좌석 비춰 줘', 'N번 자리 카메라로 봐 줘' 같은 요청에 쓴다.",
+        "parameters": {"type": "object", "properties": {
+            "seat": {"type": "integer", "description": "좌석 번호 1~4"}}, "required": ["seat"]},
+    },
+    {
+        "name": "camera_home",
+        "description": "수동으로 돌린 팬틸트 카메라를 원위치로 돌린다. '원위치', '카메라 돌려 놔' 같은 요청에 쓴다.",
+        "parameters": {"type": "object", "properties": {}},
+    },
 ]
 TOOL_NAMES = {t["name"] for t in TOOL_DECLS}
+CAMERA_TOOLS = {"look_at_seat", "camera_home"}
 # Gemini 는 인자 없는 함수에 빈 properties 를 주면 거절할 수 있어 parameters 를 뺀다 (Ollama 는 그대로)
 GEMINI_DECLS = [{k: v for k, v in t.items() if not (k == "parameters" and not v.get("properties"))}
                 for t in TOOL_DECLS]
@@ -100,7 +115,8 @@ ASK_SYSTEM = """너는 강의실 AI 조교다. 강사의 질문에 도구로 조
 - 종류: fall=쓰러짐, question=질문(손 들기), away=자리 비움. 결과: resolved=완료, false_alarm=오감지, expired=만료, cleared=복귀.
 - 시간 표현("오늘", "최근 30분", "10시부터")은 질문과 함께 주는 현재 시각 기준으로 since/until 로 바꾼다. "오늘"은 since="today".
 - 확인 시간(confirm_after_s)은 감지부터 강사가 확인하기까지, 처리 시간은 감지부터 완료까지다. 초가 60을 넘으면 "1분 20초"처럼 쓴다.
-- 지금은 조회만 할 수 있다. 확인·완료 처리를 부탁받으면 강사 화면에서 직접 눌러 달라고 안내한다.
+- 할 수 있는 조치는 카메라 돌리기(look_at_seat, camera_home)뿐이다. 확인·완료·오감지 처리를 부탁받으면 강사 화면에서 직접 눌러 달라고 안내한다.
+- look_at_seat 결과가 ok=false 면 message 의 이유를 그대로 알린다 (예: 다른 좌석 이벤트를 추적 중). ok=true 면 "N번 좌석을 비추고 있습니다. 60초 뒤 원위치로 돌아갑니다"처럼 알린다.
 - 한국어 존댓말로 핵심부터 쓴다. 3~4문장 이내. 건이 많으면 가장 중요한 몇 건만 들고 전체 건수를 말한다. 표나 마크다운, 목록 기호는 쓰지 않는다.
 - 장비 질문은 끊긴 장비만 짧게 말한다. 시각은 "10시 31분", 경과는 "3분 전"처럼 쓴다. 영어로 답하지 않는다."""
 
@@ -127,6 +143,11 @@ def summarize_result(result) -> str:
         return "?"
     if "error" in result:
         return f"오류: {result['error']}"
+    if "ok" in result:                                                   # [수동보기] 카메라 도구
+        if not result["ok"]:
+            return {"tracking": "이벤트 추적 중이라 거절", "no_preset": "각도 미등록", "pantilt_off": "팬틸트 꺼짐",
+                    "bad_seat": "좌석 번호 오류"}.get(result.get("reason"), "거절")
+        return "원위치" if result.get("home") else f"{result.get('seat')}번으로 이동"
     if "count" in result:
         return f"{result['count']}건"
     if "total" in result:
@@ -259,7 +280,8 @@ def _run_tool(call_tool, name, args, used: list) -> dict:
         result = call_tool(name, args if isinstance(args, dict) else {})
         log.info("도구 %s %s -> %s (%.2fs)", name, args, summarize_result(result), time.time() - t0)
     used.append({"name": str(name), "args": args if isinstance(args, dict) else {},
-                 "summary": summarize_result(result)})
+                 "summary": summarize_result(result),
+                 **({"ok": bool(result.get("ok"))} if name in CAMERA_TOOLS else {})})   # [수동보기] 화면의 [원위치] 버튼용
     return result
 
 
@@ -272,8 +294,37 @@ _ACTION_Q = re.compile(r"(완료|오감지|종료|해결|확인)\s*(으로|로)?
 RULE_ANSWERS = {
     "name": "학생 이름은 AI 조교가 다루지 않습니다. 좌석 번호로 물어봐 주세요 (예: \"2번 좌석 오늘 기록\"). "
             "이름은 강사 화면 좌석도에서 확인할 수 있습니다.",
-    "action": "AI 조교는 지금 조회만 할 수 있습니다. 확인·완료·오감지는 강사 화면의 이벤트에서 직접 눌러 주세요.",
+    "action": "AI 조교는 조회와 카메라 돌리기만 할 수 있습니다. 확인·완료·오감지는 강사 화면의 이벤트에서 직접 눌러 주세요.",
 }
+
+
+# [수동보기] 분명한 카메라 명령은 LLM 없이 바로 (Gemini 가 막혀도 동작, 빠름). 문장 전체가 명령일 때만.
+_VIEW_Q = re.compile(r"^\s*(?:(?:좌석|자리)\s*)?(?P<seat>[1-4])\s*번\s*(좌석|자리|학생)?\s*(을|를|좀|쪽)?\s*(카메라로\s*)?"
+                     r"(보여|비춰|비추|봐|확대)\s*(줘|주세요|줄래|봐|라)?\s*[.?!~]*\s*$")
+_HOME_Q = re.compile(r"^\s*(카메라\s*)?(원위치|원래\s*자리|홈으로)\s*(로|으로)?\s*(돌려|해|가)?\s*(줘|주세요)?\s*[.?!~]*\s*$")
+
+
+def camera_rule(question: str, call_tool) -> dict | None:
+    """'1번 보여줘' / '원위치' 를 바로 처리한다. 해당 없으면 None."""
+    m = _VIEW_Q.match(question)
+    name, args = (("look_at_seat", {"seat": int(m.group("seat"))}) if m else
+                  (("camera_home", {}) if _HOME_Q.match(question) else (None, None)))
+    if name is None:
+        return None
+    used: list = []
+    r = _run_tool(call_tool, name, args, used)
+    if r.get("ok") and r.get("home"):
+        text = "카메라를 원위치로 돌렸습니다." if not r.get("note") else "수동으로 돌린 카메라가 없어 이미 원위치입니다."
+    elif r.get("ok"):
+        text = f"{r['seat']}번 좌석을 비추고 있습니다. {int(r.get('hold_s', 60))}초 뒤 원위치로 돌아갑니다."
+    elif r.get("reason") == "tracking":
+        t = r.get("tracking") or {}
+        kind = {"fall": "쓰러짐", "question": "질문", "away": "자리비움"}.get(t.get("kind"), "")
+        text = (f"지금 {t.get('seat')}번 좌석 {kind} 이벤트를 추적 중이라 카메라를 돌릴 수 없습니다. "
+                "이벤트를 완료한 뒤 다시 요청해 주세요.")
+    else:
+        text = f"카메라를 돌리지 못했습니다. {r.get('message') or r.get('error') or ''}".strip()
+    return {"text": text, "mode": "rule", "tools": used, "took_s": 0.0, "fallback": []}
 
 
 def rule_answer(question: str) -> str | None:
@@ -301,6 +352,10 @@ def answer(question: str, now: str | None, call_tool, cfg: dict, only: str | Non
     rule = rule_answer(question) if not only else None
     if rule:
         return {"text": rule, "mode": "rule", "tools": [], "took_s": 0.0, "fallback": []}
+    cam = camera_rule(question, call_tool) if not only else None           # [수동보기]
+    if cam:
+        cam["took_s"] = round(time.monotonic() - t0, 1)
+        return cam
     deadline = t0 + float(cfg.get("ask_timeout_s", 30))
     errors = []
     for mode, loop, enabled, cooldown, model in (

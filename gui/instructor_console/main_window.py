@@ -124,6 +124,8 @@ class MainWindow(QMainWindow):
             self.home.assistant.on_answer(m)
         elif name == "report":                           # [리포트] ⑥ 수업 종료 리포트
             self.home.on_report(m)
+        elif name == "view_state":                       # [수동보기] 팬틸트로 좌석 보기 시작·끝
+            self.home.on_view_state(m)
 
     def on_connection(self, ok: bool):
         self.offline.setVisible(not ok)

@@ -14,6 +14,7 @@ timers:
   question_expire_s: 180    # 임시값, 논의
   away_alert_s: 60          # 임시값, 논의
   class_condition_s: 10     # 반 집계를 강사 화면에 보내는 주기
+  view_hold_s: 60           # [수동보기] "1번 좌석 보여줘" 로 비추는 시간 (끝나면 원위치)
 track:
   nudge_max_hz: 10
   nudge_gain: 8.0           # dx 1.0 = 화면 폭 절반 → 몇 도 보정할지, 측정 후 조정 (방향이 반대면 음수로)

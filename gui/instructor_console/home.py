@@ -20,6 +20,7 @@ from common import protocol as P
 
 from . import theme as T
 from .assistant import AssistantPanel                # [질의] ⑤ AI 조교에게 묻기
+from .camera_view import CameraViewPanel             # [수동보기] "1번 좌석 보여줘"
 from .report_view import ReportPanel                 # [리포트] ⑥ 수업 종료 리포트
 from .store import SEATS, Store
 from .video import ClipPlayer, LiveVideo, UdpFrameSource
@@ -618,7 +619,8 @@ class HomePage(QWidget):
         self.event_panel = EventPanel(store, send, logs, cam2, clip_root)
         self.student_panel = StudentPanel(store, logs)
         self.report_panel = ReportPanel()                                  # [리포트]
-        for w in (self.seat_map, self.event_panel, self.student_panel, self.report_panel):
+        self.view_panel = CameraViewPanel(cam2, send)                      # [수동보기]
+        for w in (self.seat_map, self.event_panel, self.student_panel, self.report_panel, self.view_panel):
             self.seat_area.addWidget(w)
         self.reports: dict[int, dict] = {}                                 # [리포트] report_id -> 최신 report
         lay.addWidget(self.seat_area, 11)
@@ -640,6 +642,8 @@ class HomePage(QWidget):
         self.event_panel.closed.connect(self.show_map)
         self.student_panel.closed.connect(self.show_map)
         self.report_panel.closed.connect(self.show_map)                    # [리포트]
+        self.view_panel.closed.connect(self.show_map)                      # [수동보기]
+        self.assistant.camera_home.connect(lambda: send("view_request", {"seat": None}))
         self.assistant.open_report.connect(self.open_report)
         self.assistant.save_report_pdf.connect(self.save_report_pdf)
 
@@ -652,6 +656,19 @@ class HomePage(QWidget):
         self.event_panel.open(event_id)
         self.log.select(event_id)
         self.seat_area.setCurrentWidget(self.event_panel)
+
+    # ── [수동보기] ──
+    def on_view_state(self, m: dict):
+        """Control 의 view_state. 시작이면 좌석도 자리에 카메라 보기, 끝이면 (보고 있던 경우) 좌석도로."""
+        self.view_panel.show_state(m)
+        self.assistant.on_view_state(m)
+        if m.get("seat"):
+            if self.seat_area.currentWidget() is not self.event_panel:      # 이벤트 창을 보는 중이면 가리지 않는다
+                self.event_panel.clip.stop()
+                self.log.select(0)
+                self.seat_area.setCurrentWidget(self.view_panel)
+        elif self.seat_area.currentWidget() is self.view_panel:
+            self.seat_area.setCurrentWidget(self.seat_map)
 
     # ── [리포트] ──
     def on_report(self, m: dict):
@@ -688,3 +705,5 @@ class HomePage(QWidget):
             self.event_panel.refresh()
         elif cur is self.student_panel:
             self.student_panel.refresh()
+        elif cur is self.view_panel:                                        # [수동보기] 남은 시간
+            self.view_panel.tick()

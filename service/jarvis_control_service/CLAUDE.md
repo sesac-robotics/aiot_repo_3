@@ -246,6 +246,17 @@ control ↔ instructor_console:
 | ↑ | `report_request` | `{"report_id"}` | [리포트] 강사 [수업 종료 리포트] (오늘 하루) |
 | ↓ | `report` | `{"report_id","status":"writing"\|"done"\|"error","data","summary","suggestions","mode","took_s","fallback"}` | [리포트] 숫자 먼저(writing) → 문장 붙여 한 번 더(done) |
 
+| ↑ | `view_request` | `{"seat": 1~4 \| null}` | [수동보기] 강사 화면 [원위치] (null) 등 |
+| ↓ | `view_state` | `{"seat","until","by"}` / `{"seat":null,"why":"timeout"\|"event"\|"request"}` | [수동보기] 시작·끝 → Console 이 카메라 보기 창을 열고 닫음 |
+
+[수동보기] 강사 "1번 좌석 보여줘" (10/22 결정):
+
+- AI 조교가 `tool_call look_at_seat {seat}` / `camera_home {}` 를 보내거나 Console 이 `view_request` 를 보내면
+  hub `camera_tool()` 이 각도 미등록만 거르고 `EventManager.on_view_request(seat, now, by)` 에 맡긴다. **판단은 event_manager.**
+- **열린 이벤트를 추적 중이면 거절** (`ok:false, reason:"tracking"`). 이벤트가 없을 때만 `pantilt preset {kind:0}`(LED 끔) + `track_target`.
+- `view_hold_s`(control.yaml timers, 60초) 뒤 tick 이 원위치(home). 그 전에 새 이벤트가 오면 `_reschedule()` 이 바로 그 이벤트로 넘긴다.
+- 이벤트가 아니므로 help_event·event_log·녹화에 남기지 않는다. 확인 단계 없이 바로 실행 (되돌리기 쉬움).
+
 [리포트] 수업 종료 리포트 (기능 3, 10/22):
 
 - 강사가 누를 때만 만든다. 범위는 오늘 하루(0시~지금). DB 에 리포트를 저장할지는 미정 (지금은 화면·PDF 만).
@@ -318,6 +329,7 @@ tick (0.1초마다, Control 시계):
 1. 쓰러짐 단계 알림: 미확인 15초 → 옆자리(`seat.neighbors`) `fall_alert neighbor`, 30초 → 전체 `fall_alert all`
 2. 질문 만료: `question_expire_s` 초과 → `closed`(expired)
 3. 자리비움 미복귀: `away_alert_s` 초과 → 강사에게 재알림
+3-1. [수동보기] `view_hold_s` 가 지나면 수동 보기 끝 → 원위치
 4. `reschedule()`: 대기열 맨 앞이 지금 active와 다르면 교체(선점 포함) → `track_target` + `pan_tilt preset`. 비면 `home`
 
 [알림문구] `explain_request.situation` (강사용 알림 문구를 다시 만드는 순간, `_explain()`):

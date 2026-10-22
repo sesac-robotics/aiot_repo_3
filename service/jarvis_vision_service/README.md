@@ -74,6 +74,15 @@ control ◀──explain_text {event_id, text, mode, seq, situation}────
 설정 (`config/assistant.yaml`): `ask_timeout_s`, `ask_max_tool_rounds`, `gemini_ask_timeout_s`, `ollama_ask_timeout_s`,
 `gemini_ask_model`(질의용 Gemini, 비우면 `gemini_model`), `ask_ollama_model`(비우면 `ollama_model`. 3b 가 도구를 잘 못 고르면 7b 로), `ask_tool_timeout_s`, `ask_max_chars`, `ask_max_concurrent`.
 
+## 팬틸트로 좌석 보기 (기능 2 확장, 10/22)
+
+"1번 좌석 보여줘", "좌석 2번 비춰줘", "원위치" → 팬틸트가 그 좌석을 비추고 강사 화면 좌석도 자리에 실시간 영상이 열린다.
+
+- 분명한 명령(문장 전체가 "N번 (좌석) 보여줘/비춰줘", "원위치")은 **LLM 없이 규칙으로 바로** 처리한다 (`ask.camera_rule`, Gemini 가 막혀도 동작).
+  "카메라를 3번 쪽으로 돌려줄래?" 처럼 다른 표현은 LLM 이 `look_at_seat` / `camera_home` 도구를 고른다.
+- 판단은 control `event_manager`: **이벤트를 추적 중이면 거절**, 아니면 LED 끈 채로 이동, **60초 뒤 원위치**, 새 이벤트가 오면 바로 넘김.
+- "3번 좌석 오늘 기록 보여줘" 같은 조회 문장은 카메라 명령으로 잡지 않는다 (조회로 감).
+
 ## 수업 종료 리포트 (기능 3)
 
 강사가 [수업 종료 리포트] 를 누르면 오늘 하루(0시~지금) 리포트를 만든다.

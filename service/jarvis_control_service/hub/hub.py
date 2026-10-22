@@ -42,6 +42,8 @@ from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT
 from hub.control_config import (DB_PATH, SERVICE_DIR, ConfigError, clip_abs_path, clip_db_path,
                                 clip_dir, load_control_config)
 from hub.ask_tools import AskTools, fmt as fmt_time                       # [질의]
+
+CAMERA_TOOLS = {"look_at_seat", "camera_home"}                           # [수동보기] 카메라를 움직이는 도구 (조회 아님)
 from hub.db import CLIP_DELETED, CLIP_RECORDING, CLIP_SAVED, SYSTEM_NODE, Database, SchemaMismatch
 from hub.event_manager import PANTILT, RECORDER, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT, [녹화] RECORDER
 from hub.pantilt import PanTiltService                                    # [팬틸트]
@@ -438,6 +440,22 @@ class HubServer:
         await self.send(VISION_NODE, "ask_request", {"ask_id": v["ask_id"], "text": v["text"].strip(),
                                                      "now": fmt_time(rx_ts)})
 
+    async def camera_tool(self, name: str, args: dict, rx_ts: float, by: str = "instructor_console") -> dict:
+        """[수동보기] look_at_seat {seat} / camera_home {}. 각도 미등록만 여기서 거르고, 나머지 판단은 event_manager."""
+        seat = None
+        if name == "look_at_seat":
+            try:
+                seat = int(args.get("seat"))
+            except (TypeError, ValueError):
+                return {"ok": False, "reason": "bad_seat", "message": "seat 는 1~4 숫자"}
+            if self.pantilt is not None and seat not in self.pantilt.presets():
+                return {"ok": False, "reason": "no_preset",
+                        "message": f"{seat}번 좌석 팬틸트 각도가 등록되지 않았습니다 (설정 › 팬틸트 각도 등록)"}
+        fx, result = self.events.on_view_request(seat, rx_ts, by)
+        await self.apply(fx)
+        log.info("수동 보기 요청 %s seat=%s by=%s -> %s", name, seat, by, result)
+        return result
+
     async def on_report_request(self, node: str, v: dict, rx_ts: float):   # [리포트]
         """오늘 하루 숫자를 바로 모아 Console 에 먼저 보내고(status=writing), 문장은 vision 에 맡긴다.
         vision 이 없으면 숫자만으로 끝낸다(status=done, mode=none). 숫자는 LLM 을 거치지 않는다."""
@@ -499,7 +517,10 @@ class HubServer:
         elif t == "ask":                                                # [질의] 강사 질문 -> vision 의 LLM
             await self.on_ask(conn.name, v, rx_ts)
         elif t == "tool_call":                                          # [질의] vision LLM 이 도구 실행 요청
-            result = self.ask_tools.run(v["name"], v.get("args") or {})
+            if v["name"] in CAMERA_TOOLS:                               # [수동보기] 판단은 event_manager
+                result = await self.camera_tool(v["name"], v.get("args") or {}, rx_ts)
+            else:
+                result = self.ask_tools.run(v["name"], v.get("args") or {})
             log.info("질의 #%s 도구 %s %s -> %s", v["ask_id"], v["name"], v.get("args"),
                      result.get("error") or f"{len(str(result))}자")
             await self.send(conn.name, "tool_result", {"ask_id": v["ask_id"], "call_id": v["call_id"],
@@ -508,6 +529,9 @@ class HubServer:
             to = self._asks.pop(v["ask_id"], CONSOLE_NODE)
             log.info("질의 #%s 답 [%s] %s", v["ask_id"], v.get("mode"), v.get("text", "")[:80])
             await self.send(to, "ask_answer", v)
+        elif t == "view_request":                                       # [수동보기] 강사 화면 [원위치] 등
+            await self.camera_tool("camera_home" if v.get("seat") is None else "look_at_seat",
+                                   {"seat": v.get("seat")}, rx_ts, by=conn.name)
         elif t == "report_request":                                     # [리포트] 강사 [수업 종료 리포트]
             await self.on_report_request(conn.name, v, rx_ts)
         elif t == "report_text":                                        # [리포트] vision 이 쓴 요약·살펴볼 점
