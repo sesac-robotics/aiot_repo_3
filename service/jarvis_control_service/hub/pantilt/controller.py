@@ -220,6 +220,7 @@ class Controller:
         self.send('X', now=now)
         self.target = tuple(self.pose)
         self.move_seq = None
+        self.move_done_at = now
 
     def reset_target(self) -> None:
         self.latest_frame = None
