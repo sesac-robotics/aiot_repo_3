@@ -92,7 +92,8 @@ CAMERA_TYPES = {"pan_tilt",                              # ↓
                 "pan_tilt_state"}                        # ↑
 # control <-> instructor_console
 CONSOLE_TYPES = {"event_update", "queue_state", "device_update",
-                 "class_condition", "snapshot",          # ↓
+                 "class_condition", "snapshot",          # ↓ class_condition {focus_low_ratio, posture_bad_ratio, reporting,
+                                                         #     detail: {drowsy..shoulder_tilt: 0~1 | null}} [세부컨디션]
                  "preset_saved",                         # ↓ [팬틸트] {seat, pan, tilt}
                  "seat_info",                            # ↓ 좌석 한 개 {seat, label, neighbors, has_preset, student_name, registered_at}
                  "confirm", "resolve",                   # ↑
@@ -121,6 +122,11 @@ COMMON_TYPES = {"heartbeat", "node_info", "rx_ack"}
 #   얼굴: drowsy 졸음 · yawn 하품 · not_forward 전방 주시 미흡 / 자세: forward_lean 앞으로 숙임 · head_tilt 고개 기울임 ·
 #   shoulder_tilt 어깨 비대칭. 묶음 focus_low(얼굴 3개 중 하나) · posture_bad(자세 3개 중 하나)와 함께 온다.
 CONDITION_DETAIL_KEYS = ("drowsy", "yawn", "not_forward", "forward_lean", "head_tilt", "shoulder_tilt")
+# [세부컨디션] 화면·LLM 용 한글 이름과 묶음 (focus = focus_low 아래, posture = posture_bad 아래)
+CONDITION_DETAIL_KO = {"drowsy": "졸음", "yawn": "하품", "not_forward": "전방 주시 미흡",
+                       "forward_lean": "앞으로 숙임", "head_tilt": "고개 기울임", "shoulder_tilt": "어깨 비대칭"}
+CONDITION_DETAIL_GROUP = {"focus": ("drowsy", "yawn", "not_forward"),
+                          "posture": ("forward_lean", "head_tilt", "shoulder_tilt")}
 
 VALID_TYPES = INCIDENT_TYPES | VISION_TYPES | CAMERA_TYPES | CONSOLE_TYPES \
     | STUDENT_TYPES | COMMON_TYPES | REPORT_TYPES

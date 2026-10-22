@@ -174,7 +174,8 @@ class HubServer:
             elif s.type == "class_condition":
                 self.db.insert_class_condition(now, s.value["focus_low_ratio"],
                                                s.value["posture_bad_ratio"],
-                                               s.value.get("reporting", 0))
+                                               s.value.get("reporting", 0),
+                                               s.value.get("detail"))          # [세부컨디션]
 
     # ---- [팬틸트] 팬틸트 모듈 연결 --------------------------------------
     def call_pantilt(self, type_: str, v: dict):                                  # [팬틸트] 추가

@@ -97,6 +97,7 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 - `track_offset`은 메시지의 `seat`이 지금 active 좌석과 같아야 처리한다. Vision은 `seat`을 꼭 채운다.
 - nudge 각도 = `dx·nudge_gain`, `dy·nudge_gain`. 방향이 반대면 `nudge_gain`을 음수로 한다.
 - `class_condition`은 최근 30초 안에 보고한 학생만으로 비율을 내고, `reporting`(보고한 수)도 같이 보낸다.
+- [세부컨디션] `detail` = 세부 6개(drowsy 졸음 · yawn 하품 · not_forward 전방 주시 미흡 / forward_lean 앞으로 숙임 · head_tilt 고개 기울임 · shoulder_tilt 어깨 비대칭)의 반 비율. 항목마다 **그 키를 보낸 학생만** 분모로 센다(옛 클라이언트 제외). 보낸 학생이 `condition.detail_min_students`(control.yaml, 테스트 중 1명, 운영 3명 권장)보다 적으면 `null`. 강사 화면은 보고 학생이 3명 미만이면 "반 평균 ≈ 그 학생 값" 안내를 띄운다.
 - 다시 접속한 `vision_service`에는 지금 추적 대상(`track_target`)을 다시 보낸다.
 - `NodeClient`는 끊긴 동안 사건 외에 `confirm`·`resolve`·`fall_confirm`도 모아 두었다가 보낸다.
 - [녹화] 열린 이벤트는 **active든 waiting이든 모두** 확정~종료 구간을 녹화한다 (Data Structure v2 `started_at`=확정, `ended_at`=종료 그대로).
@@ -231,7 +232,7 @@ control ↔ instructor_console:
 | ↓ | `event_update` | help_event 한 행 전체 | 이벤트 생성/변경마다 |
 | ↓ | `queue_state` | `{"active":17,"waiting":[18,15]}` | 대기열 변경 시 |
 | ↓ | `device_update` | `{"node","online","note"}` | 장비 상태 변경 시 |
-| ↓ | `class_condition` | `{"focus_low_ratio","posture_bad_ratio"}` | 10초마다 (반 평균만) |
+| ↓ | `class_condition` | `{"focus_low_ratio","posture_bad_ratio","reporting","detail":{drowsy..shoulder_tilt: 0~1 \| null}}` | 10초마다 (반 평균만) |
 | ↓ | `snapshot` | `{events, queue, devices, seats}` 열린 이벤트 + 장비 상태 + 좌석(옆자리·학생 이름) | Console 접속/재접속 시 |
 | ↓ | `seat_info` | `{seat, label, neighbors, has_preset, student_name, registered_at}` | 학생 [자리 등록] 시 |
 | ↓ | `preset_saved` | `{seat, pan, tilt}` | 팬틸트 각도 저장 후 |
@@ -264,7 +265,7 @@ control ↔ instructor_console:
   문장: vision 에 `report_write {report_id, data, now}` → `report_text {summary, suggestions, mode, took_s, fallback}` 가 오면
   `report status=done` 으로 한 번 더 보낸다. vision 이 없으면 숫자만 `done`(mode `none`).
 - `report_data`: 종류별 건수, 평균·최대 확인 시간, 평균 처리 시간, 결과별 건수, 오감지 목록, 쓰러짐 단계 알림, 좌석별 건수(키는 문자열),
-  시간대별 반 평균(class_condition), 장비 끊김 구간(device_log). **좌석 번호만, 반 평균만** (학생 이름·개인 값 없음).
+  시간대별 반 평균(class_condition), 세부 6개의 오늘 평균·가장 높았던 시간대(`condition_detail`), 장비 끊김 구간(device_log). **좌석 번호만, 반 평균만** (학생 이름·개인 값 없음).
 - 메시지 코드는 새 칸 0x6_ (`report_request` 0x60, `report` 0x61, `report_write` 0x62, `report_text` 0x63). console 0x4_ 가 다 찼다.
 
 [질의] 강사 자연어 질의 (기능 2, 10/22, 1차는 조회만):
@@ -374,7 +375,7 @@ clips:                      # 이벤트 녹화 (Data Structure v2 4장)
 
 ## DB (`service/jarvis_DB/create.sql`)
 
-원본: Confluence "Data Structure" v2 (2026-10-21) 2장. 스키마는 create.sql 이 기준이고 `SCHEMA_VERSION = 3`.
+원본: Confluence "Data Structure" v2 (2026-10-21) 2장. 스키마는 create.sql 이 기준이고 `SCHEMA_VERSION = 4` (v4 = class_condition 세부 6개 컬럼 추가, 옛 hub.db 는 지우고 다시 만든다).
 
 | 테이블 | 내용 |
 | --- | --- |
@@ -384,7 +385,7 @@ clips:                      # 이벤트 녹화 (Data Structure v2 4장)
 | `help_event` | 도움 이벤트 (숫자 코드), reg_id = 그때 앉아 있던 학생, hand_down 저장 |
 | `event_log` | 이벤트 처리 기록, actor = 장비 번호 (0 system) |
 | `event_clip` | 이벤트 녹화 (cam2), status 1 녹화 중 · 2 저장됨 · 3 삭제됨 |
-| `class_condition` | 반 평균 (10초마다) |
+| `class_condition` | 반 평균 (10초마다) + 세부 6개 `drowsy_ratio` … `shoulder_tilt_ratio` (NULL 허용) |
 | `app_setting` | 강사 화면 [설정] (JSON 값) |
 
 - 상태값은 Interface Spec 숫자 코드: kind 1 fall · 2 question · 3 away / status 1 active · 2 waiting · 3 closed /

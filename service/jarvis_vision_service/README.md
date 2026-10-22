@@ -57,7 +57,7 @@ control ◀──explain_text {event_id, text, mode, seq, situation}────
 | `get_event_timeline(event_id)` | 7번 이벤트 어떻게 처리됐어? |
 | `get_stats(since, until)` | 오늘 질문 평균 몇 초 만에 확인했어? |
 | `get_device_status` | 장비 다 연결돼 있어? |
-| `get_class_condition(minutes)` | 최근 30분 반 집중도 어때? (반 평균만) |
+| `get_class_condition(minutes)` | 최근 30분 반 집중도 어때? 졸고 있어? (반 평균 + 세부 6개: 졸음·하품·전방 주시 / 숙임·고개·어깨) |
 
 - LLM 은 SQL 을 쓰지 않는다. 미리 정한 도구만 부르고, control 이 인자를 다시 검사한다.
 - **학생 이름은 다루지 않는다** — 좌석 번호로만 답한다 (도구 결과에도 이름 없음).
@@ -96,6 +96,7 @@ control ◀──explain_text {event_id, text, mode, seq, situation}────
 - **숫자는 control 이 집계한 값이 그대로 화면에 나간다. LLM 은 문장(오늘 요약 2~3문장, 살펴볼 점 0~3개)만 쓴다.**
 - 좌석 번호만, 반 평균만. 순서: Gemini(JSON 응답) → Ollama(format=json) → 규칙으로 만든 문장(mode `default`).
 - 강사 화면: ⑤ 창의 [수업 종료 리포트] → 요약 카드 [리포트 열기] → 좌석도 자리에 ⑥ 리포트 (PDF 저장·인쇄).
+- 반 컨디션 세부(10/22): 리포트 data 의 `condition_detail`(세부 6개 오늘 평균·가장 높았던 시간대)을 근거로 "집중 저하는 주로 졸음, 14시에 50%" 처럼 쓴다. LLM 이 모두 실패하면 규칙 문장도 같은 내용을 넣는다.
 - 설정: `report_timeout_s`(40), `ollama_report_timeout_s`(30). 터미널 시험: `python3 llm/ask_demo.py --report`
 
 ## 파일

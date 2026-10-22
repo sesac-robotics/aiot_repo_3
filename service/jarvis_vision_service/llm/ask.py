@@ -74,7 +74,9 @@ TOOL_DECLS = [
     },
     {
         "name": "get_class_condition",
-        "description": "최근 N분 동안 반 전체 평균 집중 저하·자세 불량 비율(0~1). 개인별 값은 없다.",
+        "description": "최근 N분 동안 반 전체 평균 집중 저하·자세 불량 비율(0~1)과 세부 항목 6개"
+                       "(졸음·하품·전방 주시 미흡 / 앞으로 숙임·고개 기울임·어깨 비대칭)의 반 평균. "
+                       "개인별 값은 없다. '졸고 있어?', '자세 어때?', '반 컨디션' 같은 질문에 쓴다.",
         "parameters": {"type": "object", "properties": {
             "minutes": {"type": "integer", "description": "최근 몇 분 (1~240, 기본 30)"}}},
     },
@@ -109,6 +111,7 @@ ASK_SYSTEM = """너는 강의실 AI 조교다. 강사의 질문에 도구로 조
   - 평균·최대 시간, 종류별·좌석별 비교 → get_stats
   - "가장 최근", "마지막" 이벤트의 처리 과정 → 먼저 search_events(status="closed", limit=1)로 번호를 찾고 get_event_timeline
   - 장비·연결 → get_device_status (summary 와 offline 을 쓴다) / 반 집중도·자세 → get_class_condition
+- 반 컨디션 답: 묶음(집중 저하·자세 불량) 평균을 먼저 말하고, detail 의 avg 에서 가장 높은 세부 항목(top_focus_item, top_posture_item)을 "주로 졸음입니다"처럼 덧붙인다. 비율은 "45%"처럼 쓴다. detail 이 null 이면 세부는 말하지 않는다. "누가 졸아?"처럼 학생을 짚는 질문에는 반 평균만 있어 누구인지는 알 수 없다고 답한다. note 에 보고 학생 수가 적다고 나오면 한 문장으로 알린다.
 - 시간 범위가 없는 질문("오감지 몇 건?")은 since/until 을 넣지 않는다. since 에 현재 시각을 넣지 않는다.
 - 도구가 error 를 돌려주면 그 안내대로 인자를 고쳐 한 번 더 부른다. count 가 0 이면 "기록이 없습니다"라고 답한다.
 - 학생은 좌석 번호로만 부른다 (예: "3번 좌석"). 이름은 모른다. 이름을 물으면 좌석 번호로만 답할 수 있다고 말한다.

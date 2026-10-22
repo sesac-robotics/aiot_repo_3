@@ -1,7 +1,7 @@
 """강사 화면 ⑥ 수업 종료 리포트 (좌석도 자리에 열림, 10/22 시안)
 
 Control 이 보내는 report {report_id, status, data, summary, suggestions, mode, took_s, fallback} 를 그린다.
-- 숫자(타일·좌석별·반 평균 막대·장비)는 data 그대로 = control 이 DB 에서 집계 ("기록에서 집계")
+- 숫자(타일·좌석별·반 평균 막대·세부 항목·장비)는 data 그대로 = control 이 DB 에서 집계 ("기록에서 집계")
 - 문장(오늘 요약·살펴볼 점)만 LLM ("AI 작성"). status=writing 이면 "쓰는 중"
 - 좌석 번호만, 반 평균만 (학생 이름·개인 값 없음)
 - [PDF 저장] [인쇄]: 아래 page 위젯을 그대로 그린다 (화면 = 종이)
@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLab
                              QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from . import theme as T
+from .condition_view import ReportDetail          # [세부컨디션]
 
 FOCUS_COLOR, POSTURE_COLOR = "#f9a825", "#bf360c"   # 밝기가 달라 색약에도 구분됨
 AI_TAG, DATA_TAG = "AI 작성", "기록에서 집계"
@@ -187,6 +188,18 @@ class ReportPanel(QWidget):
         row.addWidget(chart_box, 1)
         p.addLayout(row)
 
+        # [세부컨디션] 세부 항목 (오늘 평균 · 가장 높았던 때)
+        det_box, dbl = _box()
+        dh = QHBoxLayout()
+        dh.addWidget(QLabel("세부 항목", objectName="repHead"))
+        dh.addWidget(_tag(DATA_TAG, False))
+        dh.addStretch(1)
+        dh.addWidget(QLabel("오늘 평균 · 가장 높았던 때 · 굵게 = 묶음 안에서 가장 높은 항목", objectName="muted"))
+        dbl.addLayout(dh)
+        self.detail = ReportDetail()
+        dbl.addWidget(self.detail)
+        p.addWidget(det_box)
+
         # 장비
         dev, dl = _box()
         self.devices = QLabel(wordWrap=True, objectName="repText")
@@ -268,6 +281,7 @@ class ReportPanel(QWidget):
                 parts.append(f"<span style='color:#5f6b76'>(오감지 {v['false_alarm']})</span>")
             body.setText(" · ".join(parts) or "<span style='color:#5f6b76'>없음</span>")
         self.chart.set_rows(d.get("hourly_condition") or [])
+        self.detail.set_data(d.get("condition_detail"))
 
         outs = d.get("device_outages") or []
         if outs:

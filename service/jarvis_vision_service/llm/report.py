@@ -27,7 +27,8 @@ REPORT_SYSTEM = """너는 강의실 AI 조교다. 강사에게 보여줄 수업 
 입력은 오늘 하루 기록을 집계한 JSON 이다. 이 JSON 에 있는 사실만 쓴다.
 규칙:
 - 숫자·시각·좌석은 JSON 값을 그대로 쓴다. 없는 숫자를 만들거나 계산해서 새 숫자를 쓰지 않는다.
-- 학생은 좌석 번호로만 부른다. 개인의 집중·자세는 쓰지 않는다 (반 평균 hourly_condition 만 있다).
+- 학생은 좌석 번호로만 부른다. 개인의 집중·자세는 쓰지 않는다 (반 평균 hourly_condition·condition_detail 만 있다).
+- condition_detail 은 세부 항목 6개의 오늘 평균(avg)과 가장 높았던 시간대(peak_hour, peak)다. group focus 는 집중 저하, posture 는 자세 불량의 세부다. 반 평균 변화를 말할 때 묶음마다 avg 가 가장 높은 항목을 근거로 든다 (예: "집중 저하는 주로 졸음이었고 14시에 50%까지 올랐습니다"). null 이면 쓰지 않는다. 비율은 0.35 → 35% 로 쓴다.
 - summary: 오늘을 2~3문장으로 요약한다. 전체 건수와 종류, 확인 시간, 눈에 띄는 일(오감지, 쓰러짐 단계 알림, 장비 끊김, 반 평균 변화)을 고른다.
 - suggestions: 다음 수업에 살펴볼 점 0~3개. 각각 한 문장. JSON 의 근거(시각·좌석·값)를 넣고, 그 근거가 없으면 쓰지 않는다. 일반론("집중을 높이세요")은 쓰지 않는다.
 - 기록이 거의 없으면(total 0~1) 그렇다고 짧게 쓰고 suggestions 는 비워도 된다.
@@ -53,6 +54,15 @@ def default_text(d: dict) -> tuple[str, list[str]]:
     if case and (d.get("max_confirm_s") or 0) >= 30:                 # 확인이 30초 넘게 걸린 때
         sug.append(f"{case['at']} {case['seat']}번 좌석 {KIND_KO.get(case['kind'], case['kind'])} 확인에 "
                    f"{d['max_confirm']}가 걸렸습니다.")
+    det = d.get("condition_detail") or {}                              # [세부컨디션] 묶음별 1위 항목
+    for group, label in (("focus", "집중 저하는"), ("posture", "자세 불량은")):
+        items = [x for x in det.values() if x.get("group") == group and x.get("avg")]
+        if items and len(sug) < 3:
+            top = max(items, key=lambda x: x["avg"])
+            s_ = f"{label} 주로 {top['name']}이었습니다(오늘 평균 {round(top['avg'] * 100)}%"
+            if top.get("peak_hour") is not None and top.get("peak") is not None:
+                s_ += f", {top['peak_hour']}시 {round(top['peak'] * 100)}%"
+            sug.append(s_ + ").")
     for o in (d.get("device_outages") or [])[:1]:
         sug.append(f"{o['from']}~{o['to']} {o['name']} 연결이 끊겼습니다 ({o['duration']}).")
     return s, sug[:3]
