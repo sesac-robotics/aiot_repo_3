@@ -1,111 +1,222 @@
+"""Vision node: hub UDP frames -> pose observations / track_obs over TCP v3.
+
+Calibration uses run_fixed_vision.py before starting the streamers.
+This test runner tracks only seat 1 and refuses multi-person cam2 frames.
 """
-vision_service 노드 실행 파일. VS Code에서 이 파일을 열고 Run Code(▶)를 누르면 된다.
-(control 서버는 먼저 service/jarvis_control_service/run_hub.py 로 켜 둔다)
-
-- 카메라 영상은 camera_streamer 가 UDP 로 바로 보낸다 (control 을 거치지 않음).
-- 사건(fall/question/away)은 판정이 확정·해제되는 순간 한 번만 보낸다. 유지 시간은 여기서 지킨다.
-- track_target 을 받으면 그 좌석을 추적하며 track_offset 을 10~15회/초 보낸다.
-- explain_request 를 받으면 LLM(Gemini 기본, Ollama 백업) 설명을 explain_text 로 돌려준다.
-
-터미널에서는:  python3 run_assistant.py [--server 127.0.0.1]
-"""
-
 import argparse
+import json
 import logging
+from pathlib import Path
+import queue
+import socket
 import sys
 import threading
 import time
-from pathlib import Path
+import uuid
 
-# common/ 은 저장소 최상위(aiot_repo_3/)에 있다
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common.config import load_config
+from common.node_client import NodeClient
+from common.protocol import VISION_NODE, VIDEO_HEADER, VISION_VIDEO_PORTS
+from fixed_camera.config import load, validate
+from fixed_camera.core import Person, SeatMatcher, valid_point
 
-from common.config import load_config          # noqa: E402
-from common.node_client import NodeClient      # noqa: E402
-from common.protocol import VISION_NODE        # noqa: E402
-
-LOOP_FPS = 15            # 감지 루프 목표 속도 (초당 반복 횟수)
-
-track_seat = None        # 지금 추적할 좌석 (control 의 track_target 으로 바뀜)
-
-
-def on_message(client: NodeClient, msg: dict):
-    """control 이 보낸 메시지 (수신 스레드에서 불림)."""
-    global track_seat
-    t, v = msg["type"], msg["value"]
-    if t == "track_target":
-        track_seat = v.get("seat")
-        print(f"<- track_target: {track_seat}")
-    elif t == "explain_request":
-        # LLM 호출은 느리므로 따로 돌린다 (수신 스레드를 막으면 track_target 이 늦게 온다)
-        threading.Thread(target=explain, args=(client, v), daemon=True).start()
+log = logging.getLogger('vision')
+ROOT = Path(__file__).resolve().parent
 
 
-def explain(client: NodeClient, req: dict):
-    """TODO: LLM 으로 상황 설명 만들기 (Gemini -> 실패하면 Ollama -> 실패하면 기본 문구).
-    text 는 꼭 문자열로 보낸다 (control 이 문자열이 아니면 버림)."""
-    client.send("explain_text", value={"event_id": req["event_id"],
-                                       "text": f"{req['seat']}번 좌석 {req['kind']}", "mode": "default"})
+def nose_target(people):
+    """No cross-camera identity claim: one visible person is required."""
+    if len(people) != 1 or not valid_point(people[0].keypoints, 0):
+        return None
+    return tuple(people[0].keypoints[0][:2])
 
 
-def detect() -> dict:
-    """TODO: 카메라 프레임을 보고 좌석별 상태를 돌려준다. 예: {(2, "question"): True}
-    지금 켜진 것만 돌려줘도 된다 (빠진 키는 False 로 보고 end 를 보낸다)."""
-    return {}
+class Receiver:
+    def __init__(self, cam, bind):
+        self.cam = cam
+        self.latest = queue.Queue(maxsize=1)
+        self.stop = threading.Event()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((bind, VISION_VIDEO_PORTS[cam]))
+        self.sock.settimeout(.2)
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
 
+    def run(self):
+        last_id, last_capture = None, 0.
+        while not self.stop.is_set():
+            try:
+                data, _ = self.sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if len(data) <= VIDEO_HEADER.size or data[0] != self.cam:
+                continue
+            cam, fid, captured = VIDEO_HEADER.unpack_from(data)
+            if not -.2 <= time.time()-captured <= .8:
+                continue
+            # Allow a streamer's frame counter to restart, using newer capture time.
+            if captured <= last_capture or (fid == last_id):
+                continue
+            last_id, last_capture = fid, captured
+            try:
+                self.latest.get_nowait()
+            except queue.Empty:
+                pass
+            self.latest.put_nowait((fid, captured, data[VIDEO_HEADER.size:]))
 
-def find_offset(seat: int):
-    """TODO: 추적 카메라 화면에서 대상의 중심 오차 (dx, dy) (-1~1). 못 찾으면 None."""
-    return None
+    def close(self):
+        self.stop.set()
+        self.sock.close()
+        self.thread.join(timeout=1)
 
 
 def main():
-    ap = argparse.ArgumentParser(description=f"{VISION_NODE} 노드")
-    ap.add_argument("--server", default=None, help="control IP (기본: config/common.yaml)")
-    ap.add_argument("--port", type=int, default=None)
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--server')
+    ap.add_argument('--port', type=int)
+    ap.add_argument('--bind', default='0.0.0.0')
+    ap.add_argument('--model', required=True, help='Existing pose model path (no automatic download)')
+    ap.add_argument('--device', default='0')
+    ap.add_argument('--imgsz', type=int, default=640)
+    ap.add_argument('--seats', default=str(ROOT/'config/fixed_seats.local.json'))
+    ap.add_argument('--record-dir', default=None, help='Optional local cam1/cam2 MP4 and timestamp logs')
     args = ap.parse_args()
+    if not Path(args.model).is_file():
+        ap.error('Pose model file not found; supply its actual local path')
     cfg = load_config(control_host=args.server, control_port=args.port)
+    calibration = load(args.seats)
+    if '1' not in calibration['seats']:
+        ap.error('Register seat 1 with run_fixed_vision.py --calibrate first')
+    calibration['seats'] = {'1': calibration['seats']['1']}
+    import cv2
+    import numpy as np
+    from ultralytics import YOLO
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s: %(message)s')
+    session = str(uuid.uuid4())
+    stop = threading.Event()
+    lock = threading.Lock()
+    target = {'seat': None, 'gen': 0, 'since': time.time()}
+    failures = queue.Queue()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
-    logging.getLogger("client").setLevel(logging.ERROR)   # 재접속 로그는 숨김
+    def on_message(msg):
+        v = msg['value']
+        if msg['type'] == 'track_target':
+            with lock:
+                target.update(seat=v.get('seat'), gen=v['gen'], since=time.time())
+            log.info('Target %s', target)
+        elif msg['type'] == 'explain_request':
+            client.send('explain_text', value={'event_id': v['event_id'],
+                'text': f"{v['seat']}번 좌석 {v['kind']}", 'mode': 'default'})
 
-    client = NodeClient(VISION_NODE, cfg["control_host"], int(cfg["control_port"]),
-                        on_message=lambda m: on_message(client, m))
-    client.start()
-    print(f"{VISION_NODE}: control {cfg['control_host']}:{cfg['control_port']} 에 접속 중... (Ctrl+C 로 끝)")
+    client = NodeClient(VISION_NODE, cfg['control_host'], int(cfg['control_port']), on_message=on_message)
+    receivers = []
+    threads = []
 
-    prev: dict = {}                  # 직전 상태 (변화 감지용)
-    frames, t0 = 0, time.time()      # fps 측정용
+    def worker(receiver, model):
+        writer = timeline = None
+        matcher = SeatMatcher(calibration)
+        count, started = 0, time.time()
+        try:
+            while not stop.is_set():
+                try:
+                    fid, captured, jpeg = receiver.latest.get(timeout=.2)
+                except queue.Empty:
+                    client.set_status(**{f'cam{receiver.cam}_fps': 0.})
+                    continue
+                frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    continue
+                h, w = frame.shape[:2]
+                if args.record_dir:
+                    if writer is None:
+                        folder = Path(args.record_dir)/session
+                        folder.mkdir(parents=True, exist_ok=True)
+                        writer = cv2.VideoWriter(str(folder/f'cam{receiver.cam}.mp4'),
+                            cv2.VideoWriter_fourcc(*'mp4v'), 15., (w, h))
+                        if not writer.isOpened():
+                            raise RuntimeError('Cannot open MP4 writer')
+                        timeline = (folder/f'cam{receiver.cam}.jsonl').open('w')
+                    writer.write(frame)
+                    timeline.write(json.dumps({'frame_id': fid, 'captured_at': captured})+'\n')
+                    timeline.flush()
+                with lock:
+                    active = dict(target)
+                opts = dict(conf=.25, imgsz=args.imgsz, device=args.device, verbose=False)
+                if receiver.cam == 1:
+                    validate(calibration, w/h)
+                    result = model.track(frame, persist=True,
+                        tracker=str(ROOT/'fixed_camera/bytetrack_fixed.yaml'), **opts)[0]
+                else:
+                    result = model.predict(frame, **opts)[0]
+                people = []
+                if result.boxes is not None and result.keypoints is not None:
+                    boxes = result.boxes.xyxyn.cpu().tolist()
+                    kpts = result.keypoints.data.cpu().numpy().copy()
+                    kpts[:, :, 0] /= w
+                    kpts[:, :, 1] /= h
+                    ids = result.boxes.id
+                    ids = ids.int().cpu().tolist() if ids is not None else [None]*len(boxes)
+                    people = [Person(tuple(b), k.tolist(), tid, confidence)
+                        for b, k, tid, confidence in zip(boxes, kpts, ids, result.boxes.conf.cpu().tolist())]
+                now = time.time()
+                if receiver.cam == 1:
+                    rows = matcher.observe(people, time.monotonic()) if now-captured <= .8 else matcher.unknown('STALE')
+                    client.send('seat_obs', value={'session': session, 'frame_id': fid,
+                        'captured_at': captured, 'processed_at': now, 'seats': rows})
+                elif active['seat'] == 1 and captured >= active['since']:
+                    nose = nose_target(people) if now-captured <= .3 else None
+                    client.send('track_obs', seat=1, value={'gen': active['gen'], 'frame_id': fid,
+                        'captured_at': captured, 'status': 'TRACKED' if nose else 'LOST',
+                        **({'cx': nose[0], 'cy': nose[1]} if nose else {})})
+                count += 1
+                if now-started >= 2:
+                    fps = count/(now-started)
+                    client.set_status(**{f'cam{receiver.cam}_fps': fps})
+                    log.info('cam%d analysis %.1f fps, age %.0f ms', receiver.cam, fps, (now-captured)*1000)
+                    count, started = 0, now
+        except Exception as exc:
+            log.exception('cam%d stopped', receiver.cam)
+            failures.put(exc)
+            stop.set()
+        finally:
+            if writer is not None:
+                writer.release()
+            if timeline is not None:
+                timeline.close()
+
     try:
-        while True:
-            start = time.time()
-
-            # [사건] 상태가 바뀐 순간(엣지)에만 start/end 를 보낸다
-            state = detect()
-            for seat, kind in prev.keys() | state.keys():      # 결과에서 빠진 것은 False (end)
-                on = state.get((seat, kind), False)
-                if on != prev.get((seat, kind), False):
-                    client.send(kind, seat=seat, value={"state": "start" if on else "end"})
-            prev = state
-
-            # [추적] control 이 정한 좌석만 따라간다. seat 을 꼭 채운다.
-            if track_seat is not None:
-                off = find_offset(track_seat)
-                value = {"found": False} if off is None else {"found": True, "dx": off[0], "dy": off[1]}
-                client.send("track_offset", seat=track_seat, value=value)
-
-            frames += 1
-            if time.time() - t0 >= 1.0:
-                client.set_fps(frames / (time.time() - t0))
-                client.set_status(cam1_fps=0.0, cam2_fps=0.0)     # TODO: 실제 카메라 수신 fps
-                frames, t0 = 0, time.time()
-
-            time.sleep(max(0.0, 1.0 / LOOP_FPS - (time.time() - start)))
+        # Separate model instances avoid shared tracker/inference state between cameras.
+        models = [YOLO(args.model), YOLO(args.model)]
+        for model in models:
+            if model.task != 'pose':
+                raise ValueError('Use a pose model, e.g. yolo11n-pose.pt')
+            model.predict(np.zeros((480, 640, 3), dtype=np.uint8), device=args.device,
+                          imgsz=args.imgsz, verbose=False)
+        for cam in (1, 2):
+            receivers.append(Receiver(cam, args.bind))
+        client.start()
+        for receiver, model in zip(receivers, models):
+            thread = threading.Thread(target=worker, args=(receiver, model), daemon=True)
+            thread.start()
+            threads.append(thread)
+        log.info('Seat 1 test: hub -> UDP 5021/5022. cam2 must contain ONE person. Ctrl+C stops.')
+        while not stop.wait(.2):
+            pass
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
+        for receiver in receivers:
+            receiver.close()
+        for thread in threads:
+            thread.join(timeout=5)
         client.stop()
+    if not failures.empty():
+        raise SystemExit(f'Vision failed: {failures.get()}')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

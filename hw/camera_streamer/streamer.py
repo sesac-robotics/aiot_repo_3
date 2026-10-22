@@ -26,7 +26,7 @@ CAM_NAMES = {1: "고정 카메라(cam1)", 2: "팬틸트 카메라(cam2)"}
 
 # 리눅스는 V4L2 로 바로 연다 (기본 백엔드는 없는 장치를 열 때 ffmpeg 등을 차례로 시도하며 긴 에러를 찍는다)
 BACKEND = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
-cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)   # 열기 실패 경고는 아래에서 한 번만 안내
+pass   # 열기 실패 경고는 아래에서 한 번만 안내
 
 SEND_FPS = 15
 WIDTH = 640                  # 보낼 영상 가로 크기 (세로는 비율대로)

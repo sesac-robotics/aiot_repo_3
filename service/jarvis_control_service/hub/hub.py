@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 
 from common.config import load_config
-from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
+from common.protocol import (VISION_NODE, CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
                              INCIDENT_TYPES, NOT_LOGGED_TYPES, FrameReader, MessageError, encode,
                              STUDENT_NODES, make_message, parse_message, student_seat)
 from hub.control_config import DB_PATH, SERVICE_DIR, ConfigError, load_control_config
@@ -89,7 +89,7 @@ class HubServer:
         self.pantilt: PanTiltService | None = None                                        # [팬틸트]
         self.pantilt_port = pantilt_port or cfg.get("pantilt", {}).get("port", "auto")   # [팬틸트] control.yaml pantilt.port
         self.pantilt_sim = pantilt_sim                                                    # [팬틸트]
-        self.video = VideoRelay(host, self.console_ip) if video else None   # 영상: streamer -> Console 중계
+        self.video = VideoRelay(host, self.console_ip, vision_ip=self.vision_ip) if video else None   # 영상: streamer -> Console 중계
         self.loop: asyncio.AbstractEventLoop | None = None                               # [팬틸트]
         self._last_report = time.time()
         self._report_counts: dict[str, int] = {}    # 지난 현황 요약 때의 summary_count
@@ -255,6 +255,10 @@ class HubServer:
             log.exception("%s 메시지 처리 중 오류 - 이 메시지만 버림: %s", node_name, msg)
         return node_name
 
+    def vision_ip(self):
+        conn = self.nodes.get(VISION_NODE)
+        return conn.peer.rsplit(":", 1)[0] if conn and conn.online else None
+
     def console_ip(self) -> str | None:
         """영상을 보낼 instructor_console 의 IP (TCP 접속 주소). 접속 중이 아니면 None."""
         conn = self.nodes.get(CONSOLE_NODE)
@@ -301,6 +305,9 @@ class HubServer:
             await self.send(conn.name, "rx_ack", {"seq": msg["seq"]})
             await self.apply(self.events.on_incident(
                 t, seat, v["state"], rx_ts, source=f"{conn.name}:{msg['seq']}"))
+        elif t == "seat_obs":
+            if conn.name == VISION_NODE:
+                await self.apply(self.events.on_seat_obs(v, rx_ts))
         elif t == "track_obs":                                          # [팬틸트] track_offset 대체
             await self.apply(self.events.on_track_obs(v, rx_ts))       # [팬틸트] {gen, frame_id, captured_at, status, cx, cy}
         elif t == "explain_text":

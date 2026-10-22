@@ -81,7 +81,7 @@ INCIDENT_STATES = {"start", "end"}           # 사건 메시지의 value.state
 # ---- 메시지 종류 (5장) ----------------------------------------------------
 # vision_service <-> control
 VISION_TYPES = {"track_offset", "explain_text",          # ↑
-                "track_obs",                             # ↑ [팬틸트] track_offset 대체 {gen, frame_id, captured_at, status, cx, cy}
+                "seat_obs", "track_obs",                 # ↑ [팬틸트] track_offset 대체 {gen, frame_id, captured_at, status, cx, cy}
                 "track_target", "explain_request"}       # ↓
 # control <-> camera_controller
 CAMERA_TYPES = {"pan_tilt",                              # ↓
@@ -102,7 +102,7 @@ VALID_TYPES = INCIDENT_TYPES | VISION_TYPES | CAMERA_TYPES | CONSOLE_TYPES \
     | STUDENT_TYPES | COMMON_TYPES
 
 # messages 표에 기록하지 않는 종류 (너무 많음, D9 / 5.1)
-NOT_LOGGED_TYPES = {"heartbeat", "track_offset", "track_obs"}
+NOT_LOGGED_TYPES = {"heartbeat", "track_offset", "track_obs", "seat_obs"}
 
 # 끊긴 동안 NodeClient 가 모아 두었다가 재접속 후 보내는 종류
 # (사건 + 사람이 누른 버튼. 상태 메시지는 곧 새 값이 오므로 버린다)
@@ -128,7 +128,7 @@ TYPE_CODES = {
     "fall": 0x10, "question": 0x11, "away": 0x12,
     # vision 0x2_
     "track_offset": 0x20, "explain_text": 0x21, "track_target": 0x22, "explain_request": 0x23,
-    "track_obs": 0x24,
+    "track_obs": 0x24, "seat_obs": 0x25,
     # camera 0x3_
     "pan_tilt": 0x30, "pan_tilt_state": 0x31,
     # console 0x4_
@@ -154,6 +154,7 @@ VIDEO_HEADER = struct.Struct(">B3xId")
 VIDEO_CAMS = (1, 2)
 VIDEO_PORTS = {1: 6001, 2: 6002}              # streamer -> hub (hub 가 받는 포트)
 CONSOLE_VIDEO_PORTS = {1: 5011, 2: 5012}      # hub -> instructor_console (Console 이 받는 포트)
+VISION_VIDEO_PORTS = {1: 5021, 2: 5022}       # hub -> vision_service
 VIDEO_MAX_DATAGRAM = 65507                    # UDP(IPv4) 데이터그램 최대 크기
 VIDEO_MAX_JPEG = VIDEO_MAX_DATAGRAM - VIDEO_HEADER.size
 
@@ -421,6 +422,22 @@ def _check_value(type_: str, v: dict):
     elif type_ == "track_offset":
         if v.get("found"):
             need(_is_num(v.get("dx", 0.0)) and _is_num(v.get("dy", 0.0)), "dx, dy 는 숫자")
+    elif type_ == "seat_obs":
+        import math
+        need(isinstance(v.get("session"), str) and 0 < len(v["session"]) <= 128, "session")
+        need(_is_int(v.get("frame_id")) and v["frame_id"] >= 0, "frame_id")
+        for key in ("captured_at", "processed_at"):
+            need(_is_num(v.get(key)) and math.isfinite(v[key]), key)
+        rows = v.get("seats")
+        need(isinstance(rows, list) and 1 <= len(rows) <= 4, "seats")
+        seen = set()
+        for row in rows:
+            need(isinstance(row, dict), "seat row")
+            seat = row.get("seat")
+            need(_is_int(seat) and seat in VALID_SEATS and seat not in seen, "unique seat")
+            seen.add(seat)
+            for key in ("present", "hand_up"):
+                need(key in row and (row[key] is None or type(row[key]) is bool), key)
     elif type_ == "track_obs":
         need(_is_int(v.get("gen")), "gen 은 정수")
         if v.get("status") == "TRACKED":

@@ -223,3 +223,9 @@ __marimo__/
 *.db
 *.db-shm
 *.db-wal
+
+# Seat 1 integration local artifacts
+.active_vision_backup/
+recordings/
+service/jarvis_vision_service/config/*.local.json
+service/jarvis_vision_service/logs/

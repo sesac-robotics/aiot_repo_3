@@ -14,6 +14,7 @@ confirm 은 상태가 아니다. confirmed_at 을 기록하고 단계 알림만 
 """
 
 import logging
+from .seat_evidence import Evidence
 from dataclasses import asdict, dataclass, field
 
 from common.protocol import (CONSOLE_NODE, STUDENT_NODES, VISION_NODE,   # [팬틸트] CAMERA_NODE 제거
@@ -114,6 +115,9 @@ class EventManager:
         self.gen = 0                                     # [팬틸트] 추적 대상(active 사건)이 바뀔 때마다 +1
         self._target_id: int | None = None               # [팬틸트] 마지막으로 팬틸트에 보낸 active 사건 (좌석 대신)
         self.pan_tilt: dict = {}                         # [팬틸트] 마지막 pan_tilt_state {state, pan, tilt, gen, error}
+        self._seat_states = {}
+        self._obs_session = None
+        self._obs_frame = -1
         self._fx = Effects()
 
         for ev in open_events:
@@ -130,6 +134,45 @@ class EventManager:
     # =====================================================================
     # 입력
     # =====================================================================
+    def on_seat_obs(self, value, now):
+        # Observations are not incidents. Only this central process confirms them.
+        if not -.2 <= now-value['captured_at'] <= .8:
+            return Effects()
+        if value['session'] != self._obs_session:
+            self._obs_session, self._obs_frame = value['session'], -1
+            self._seat_states.clear()
+        if value['frame_id'] <= self._obs_frame:
+            return Effects()
+        self._obs_frame = value['frame_id']
+        out = Effects()
+        def incident(kind, seat, state):
+            fx = self.on_incident(kind, seat, state, now, source='vision_service:seat_obs')
+            out.sends.extend(fx.sends)
+            out.saves.extend(fx.saves)
+            out.logs.extend(fx.logs)
+        for row in value['seats']:
+            seat = row['seat']
+            s = self._seat_states.setdefault(seat, {
+                'seen': False, 'armed': True, 'down_sent': False,
+                **{k: Evidence(.8) for k in ('up', 'down', 'away', 'back')}})
+            p, h = row['present'], row['hand_up']
+            if p is True:
+                s['seen'] = True
+            if s['up'].update(h if p is True else None, now, 2.):
+                if s['armed']:
+                    incident('question', seat, 'start')
+                    s['armed'], s['down_sent'] = False, False
+            if s['down'].update(None if h is None else not h, now, .6):
+                if not s['down_sent'] and self._find_open(seat, 'question'):
+                    incident('question', seat, 'end')
+                s['armed'], s['down_sent'] = True, True
+            absent = None if p is None or not s['seen'] else not p
+            if s['away'].update(absent, now, 10.) and not self._find_open(seat, 'away'):
+                incident('away', seat, 'start')
+            if s['back'].update(p, now, 2.) and self._find_open(seat, 'away'):
+                incident('away', seat, 'end')
+        return out
+
     def on_incident(self, kind: str, seat: int, state: str, now: float,
                     source: str | None = None) -> Effects:
         """vision_service 의 fall / question / away start·end."""
@@ -219,7 +262,7 @@ class EventManager:
         if self.active is None or value.get("gen") != self.gen:
             return self._flush()
         self._send(PANTILT, "track", {
-            "gen": self.gen, "cx": value["cx"], "cy": value["cy"],
+            "gen": self.gen, "cx": value.get("cx", .5), "cy": value.get("cy", .5),
             "captured_at": value["captured_at"],          # cam2 촬영 시각 — 바꾸지 않고 그대로
             "frame_id": value["frame_id"],
             "found": value.get("status") == "TRACKED"})
