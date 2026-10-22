@@ -98,6 +98,11 @@ STUDENT_TYPES = {"fall_alert", "fall_alert_cancel",      # ↓
 # 공통
 COMMON_TYPES = {"heartbeat", "node_info", "rx_ack"}
 
+# condition_summary 개별 항목 (학생 → control, 10초 동안 한 번이라도 확정되면 true)
+#   얼굴: drowsy 졸음 · yawn 하품 · not_forward 전방 주시 미흡 / 자세: forward_lean 앞으로 숙임 · head_tilt 고개 기울임 ·
+#   shoulder_tilt 어깨 비대칭. 묶음 focus_low(얼굴 3개 중 하나) · posture_bad(자세 3개 중 하나)와 함께 온다.
+CONDITION_DETAIL_KEYS = ("drowsy", "yawn", "not_forward", "forward_lean", "head_tilt", "shoulder_tilt")
+
 VALID_TYPES = INCIDENT_TYPES | VISION_TYPES | CAMERA_TYPES | CONSOLE_TYPES \
     | STUDENT_TYPES | COMMON_TYPES
 
@@ -450,6 +455,8 @@ def _check_value(type_: str, v: dict):
         # 필드 이름이 틀리면 반 집계에서 조용히 '정상'으로 세어지므로 받는 순간 버린다
         need(all(isinstance(v.get(k), bool) for k in ("focus_low", "posture_bad")),
              "focus_low, posture_bad 는 true/false")
+        need(all(isinstance(v[k], bool) for k in CONDITION_DETAIL_KEYS if k in v),
+             "개별 항목(" + ", ".join(CONDITION_DETAIL_KEYS) + ")은 true/false")
     elif type_ == "heartbeat":
         need(all(v.get(k) is None or _is_num(v[k]) for k in ("fps", "cpu", "cam1_fps", "cam2_fps")),
              "fps, cpu, cam1_fps, cam2_fps 는 숫자")

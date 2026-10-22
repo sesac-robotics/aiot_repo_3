@@ -3,7 +3,8 @@
 seat_link_main(웹캠 판정)과 run_client(카메라 없는 시험 노드)가 같이 쓴다.
 - 노드 이름: student_client_<좌석>, 좌석은 1~4 (common/protocol.py VALID_SEATS)
 - control IP·포트: 저장소 최상위 config/common.yaml (명령줄 --server/--port 가 있으면 그게 우선)
-- 보내는 것: condition_summary {"focus_low": bool, "posture_bad": bool}  (명세: jarvis_control_service/CLAUDE.md)
+- 보내는 것: condition_summary 묶음 {"focus_low", "posture_bad"} + 개별 {"drowsy", "yawn", "not_forward",
+             "forward_lean", "head_tilt", "shoulder_tilt"} (모두 bool, 값은 monitor/condition.py to_summary)
              fall_confirm {"target_seat": N}                            (학생이 쓰러짐 알림 확인)
 - 받는 것  : fall_alert {"target_seat", "stage"}, fall_alert_cancel {"target_seat"}
 
@@ -59,9 +60,10 @@ class StudentLink:
         self.client.set_fps(fps)
 
     # ---- 보내기 -------------------------------------------------------
-    def send_summary(self, focus_low: bool, posture_bad: bool) -> bool:
+    def send_summary(self, summary: dict) -> bool:
+        """summary: monitor/condition.py to_summary() 결과 (묶음 2개 + 개별 6개)"""
         ok = self.client.send("condition_summary", seat=self.seat,
-                              value={"focus_low": bool(focus_low), "posture_bad": bool(posture_bad)})
+                              value={k: bool(v) for k, v in summary.items()})
         if ok:
             self.sent += 1
         else:
