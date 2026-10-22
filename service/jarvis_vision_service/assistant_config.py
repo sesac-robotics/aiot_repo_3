@@ -23,8 +23,8 @@ ENV_FILE = HERE / ".env"
 
 DEFAULTS = {
     "gemini_enabled": True,
-    "gemini_model": "gemini-3.5-flash",
-    "gemini_timeout_s": 6,
+    "gemini_model": "gemini-3.5-flash-lite",
+    "gemini_timeout_s": 5,
     "gemini_max_tokens": 1024,
     "gemini_cooldown_s": 60,
     "gemini_thinking_level": "",
@@ -37,6 +37,16 @@ DEFAULTS = {
     "temperature": 0.3,
     "max_chars": 120,
     "max_concurrent": 2,
+    # [질의]
+    "gemini_ask_model": "gemini-3.5-flash-lite",
+    "ask_timeout_s": 30,
+    "ask_max_tool_rounds": 5,
+    "gemini_ask_timeout_s": 15,
+    "ollama_ask_timeout_s": 20,
+    "ask_ollama_model": "",
+    "ask_tool_timeout_s": 5,
+    "ask_max_chars": 500,
+    "ask_max_concurrent": 1,
 }
 
 

@@ -82,7 +82,11 @@ INCIDENT_STATES = {"start", "end"}           # 사건 메시지의 value.state
 # vision_service <-> control
 VISION_TYPES = {"track_offset", "explain_text",          # ↑
                 "track_obs",                             # ↑ [팬틸트] track_offset 대체 {gen, frame_id, captured_at, status, cx, cy}
-                "track_target", "explain_request"}       # ↓
+                "track_target", "explain_request",       # ↓
+                "ask_request",                           # ↓ [질의] {ask_id, text, now}
+                "tool_call",                             # ↑ [질의] {ask_id, call_id, name, args}
+                "tool_result",                           # ↓ [질의] {ask_id, call_id, name, result}
+                "ask_answer"}                            # ↑ [질의] {ask_id, text, mode, tools, took_s} (console 로도 그대로 ↓)
 # control <-> camera_controller
 CAMERA_TYPES = {"pan_tilt",                              # ↓
                 "pan_tilt_state"}                        # ↑
@@ -95,7 +99,9 @@ CONSOLE_TYPES = {"event_update", "queue_state", "device_update",
                  "dismiss",                              # ↑ 강사 "오감지" {event_id} -> close_reason false_alarm
                  "pan_tilt_jog", "preset_save",          # ↑ [팬틸트] 프리셋 등록 화살표 {dpan, dtilt} / 등록 버튼 {seat}
                  "clip_request",                         # ↑ [녹화] 이벤트 창 다시 보기 {event_id}
-                 "clip_info"}                            # ↓ [녹화] {event_id, status: none|recording|saved|deleted, started_at, ended_at, path}
+                 "clip_info",                            # ↓ [녹화] {event_id, status: none|recording|saved|deleted, started_at, ended_at, path}
+                 "ask",                                  # ↑ [질의] 강사 자연어 질문 {ask_id, text}
+                 "ask_answer"}                           # ↓ [질의] {ask_id, text, mode, tools, took_s}
 # control <-> student_client_N
 STUDENT_TYPES = {"fall_alert", "fall_alert_cancel",      # ↓
                  "fall_confirm", "condition_summary",    # ↑
@@ -120,6 +126,7 @@ BUFFERED_TYPES = INCIDENT_TYPES | {"confirm", "resolve", "dismiss", "fall_confir
                                    "seat_register"}
 
 MAX_NAME_LEN = 50                            # seat_register 학생 이름 최대 글자 수
+MAX_ASK_LEN = 500                            # [질의] 강사 질문 최대 글자 수
 
 # 하트비트 (5.5)
 HEARTBEAT_INTERVAL_S = 2.0
@@ -142,6 +149,7 @@ TYPE_CODES = {
     # vision 0x2_
     "track_offset": 0x20, "explain_text": 0x21, "track_target": 0x22, "explain_request": 0x23,
     "track_obs": 0x24,
+    "ask_request": 0x25, "tool_call": 0x26, "tool_result": 0x27,          # [질의] (0x28~ 은 IF 명세 로그 검색 예약)
     # camera 0x3_
     "pan_tilt": 0x30, "pan_tilt_state": 0x31,
     # console 0x4_
@@ -149,6 +157,7 @@ TYPE_CODES = {
     "snapshot": 0x44, "confirm": 0x45, "resolve": 0x46,
     "pan_tilt_jog": 0x47, "preset_save": 0x48, "preset_saved": 0x49, "seat_info": 0x4A, "dismiss": 0x4B,
     "clip_request": 0x4C, "clip_info": 0x4D,
+    "ask": 0x4E, "ask_answer": 0x4F,                                         # [질의]
     # student 0x5_
     "fall_alert": 0x50, "fall_alert_cancel": 0x51, "fall_confirm": 0x52, "condition_summary": 0x53,
     "seat_register": 0x54,
@@ -431,6 +440,18 @@ def _check_value(type_: str, v: dict):
         need(isinstance(v.get("text", ""), str), "text 는 문자열")
         need(v.get("mode") is None or isinstance(v["mode"], str), "mode 는 문자열")
         need(v.get("seq") is None or _is_int(v["seq"]), "seq 는 정수")              # [알림문구]
+    elif type_ == "ask":                                                    # [질의]
+        need(_is_int(v.get("ask_id")), "ask_id 는 정수")
+        need(isinstance(v.get("text"), str) and 0 < len(v["text"].strip()) <= MAX_ASK_LEN,
+             f"text 는 1~{MAX_ASK_LEN}자 문자열")
+    elif type_ in ("ask_request", "ask_answer"):                            # [질의]
+        need(_is_int(v.get("ask_id")), "ask_id 는 정수")
+        need(isinstance(v.get("text"), str), "text 는 문자열")
+    elif type_ in ("tool_call", "tool_result"):                             # [질의]
+        need(_is_int(v.get("ask_id")) and _is_int(v.get("call_id")), "ask_id, call_id 는 정수")
+        need(isinstance(v.get("name"), str), "name 은 문자열")
+        if type_ == "tool_call":
+            need(isinstance(v.get("args", {}), dict), "args 는 dict")
     elif type_ == "fall_confirm":
         need(v.get("target_seat") in VALID_SEATS and _is_int(v.get("target_seat")),
              "target_seat 은 좌석 번호")

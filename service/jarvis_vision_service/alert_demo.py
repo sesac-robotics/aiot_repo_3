@@ -10,6 +10,7 @@ control 에 TCP 로 두 노드를 붙인다.
     터미널 1:  cd service/jarvis_control_service && python3 run_hub.py
     터미널 2:  cd service/jarvis_vision_service  && python3 alert_demo.py            # 명령을 직접 입력
                python3 alert_demo.py --auto                                         # 정해진 시나리오 (약 45초)
+               python3 alert_demo.py --alert-ollama                                 # 알림 문구에 Gemini 를 쓰지 않음 (한도 아끼기)
 
 명령:
     f 3        3번 좌석 쓰러짐 start        f 3 end   일어남 (end)
@@ -59,6 +60,7 @@ class Demo:
     def __init__(self, host: str, port: int):
         self.events: dict[int, dict] = {}        # event_id -> 최신 event_update
         self.timing: dict[tuple, tuple] = {}     # (event_id, seq) -> (mode, 걸린 초)
+        self.explain_cfg = ra.LLM_CFG                 # --alert-ollama 면 Gemini 를 끈 사본 (한도 아끼기)
         self.vision = NodeClient(VISION_NODE, host, port, on_message=self.on_vision)
         self.console = NodeClient(CONSOLE_NODE, host, port, on_message=self.on_console)
 
@@ -87,7 +89,7 @@ class Demo:
     def explain(self, req: dict):
         t0 = time.time()
         with ra.explain_slots:
-            text, mode = llm.explain_event(req, ra.LLM_CFG)
+            text, mode = llm.explain_event(req, self.explain_cfg)
         self.timing[(req["event_id"], req.get("seq"))] = (mode, time.time() - t0)
         value = {"event_id": req["event_id"], "text": text, "mode": mode}
         if "seq" in req:
@@ -208,6 +210,7 @@ def main():
     ap.add_argument("--server", default=None, help="control IP (기본: config/common.yaml)")
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--auto", action="store_true", help="정해진 시나리오만 돌리고 끝")
+    ap.add_argument("--alert-ollama", action="store_true", help="알림 문구는 Ollama 만 (Gemini 하루 한도 아끼기)")
     ap.add_argument("-v", "--verbose", action="store_true", help="LLM 로그(실패·건너뜀)도 보기")
     args = ap.parse_args()
     cfg = load_config(control_host=args.server, control_port=args.port)
@@ -219,6 +222,8 @@ def main():
         logging.getLogger("llm").setLevel(logging.ERROR)
 
     demo = Demo(cfg["control_host"], int(cfg["control_port"]))
+    if args.alert_ollama:
+        demo.explain_cfg = dict(ra.LLM_CFG, gemini_enabled=False)
     print(f"control {cfg['control_host']}:{cfg['control_port']} 에 접속 중...")
     if not demo.start():
         print("접속 실패. control(run_hub.py)이 켜져 있는지, run_assistant.py 가 꺼져 있는지 확인하세요.")

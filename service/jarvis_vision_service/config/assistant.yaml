@@ -5,8 +5,8 @@
 
 # --- 1차: Gemini (클라우드) ---
 gemini_enabled: true
-gemini_model: gemini-3.5-flash     # 10/22 측정 5/5 성공, 평균 4.2초·최대 4.9초 (3.1-flash-lite 는 평균 9.6초)
-gemini_timeout_s: 6                 # SD-08 은 5초. 3.5-flash 최대 4.9초라 1초 여유 (팀 공유 필요)
+gemini_model: gemini-3.5-flash-lite # 알림 문구. 10/22 11:32 평균 0.87초, 무료 하루 500회 (3.5-flash 는 하루 20회라 다 씀)
+gemini_timeout_s: 5                 # SD-08 기준 5초 (flash-lite 는 1초 안팎)
 gemini_max_tokens: 1024             # 출력 길이 제한. 생각하는 모델(3.5-flash 등)은 작으면 답이 잘림 (10/22 200 → 잘림)
 gemini_cooldown_s: 60               # 실패하면 이 시간 동안 Gemini 를 건너뛰고 바로 Ollama (10/21: 응답이 들쭉날쭉)
 gemini_thinking_level: ""          # 비움: 10/21 3.1-flash-lite 에 thinkingConfig 를 넣으면 응답이 멈춤. "low" 등은 되는 모델에서만
@@ -23,3 +23,14 @@ ollama_warmup: true                 # 노드 시작 때 한 번 호출해 모델
 temperature: 0.3
 max_chars: 120                      # 강사 화면에 보낼 최대 글자 수 (넘으면 자름)
 max_concurrent: 2                   # 동시에 돌리는 설명 요청 수
+
+# --- [질의] 강사 자연어 질의 + tool calling (ask.py) ---
+gemini_ask_model: gemini-3.5-flash-lite  # 질의용. 비우면 gemini_model. 도구 선택이 약하면 gemini-3.5-flash (하루 20회!)
+ask_timeout_s: 30                   # 질문 하나 전체 대기 (도구 왕복 포함). 넘으면 Ollama → 기본 답
+ask_max_tool_rounds: 5              # 도구 호출 반복 최대
+gemini_ask_timeout_s: 15            # Gemini 요청 1번 대기
+ollama_ask_timeout_s: 20            # Ollama 요청 1번 대기
+ask_ollama_model: ""                # 비우면 ollama_model. 도구 선택이 약하면 qwen2.5:7b 등으로
+ask_tool_timeout_s: 5               # control 의 도구 결과 대기
+ask_max_chars: 500
+ask_max_concurrent: 1               # 동시에 처리하는 질문 수

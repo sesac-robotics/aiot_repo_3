@@ -66,6 +66,7 @@ aiot_repo_3/
 python3 run_hub.py                                  # control 서버 (또는 python3 -m hub -v)
 python3 -m unittest tools.test_event_manager -v     # event_manager 단위 테스트 (가짜 시계)
 python3 -m unittest tools.test_protocol -v          # 바이너리 프레임 단위 테스트 (왕복, 스트림 쪼개짐, CRC, 깨진 바이트)
+python3 -m unittest tools.test_ask_tools -v         # [질의] 도구 6개 (검색 조건, 통계, 인자 오류, 학생 이름 안 나감)
 python3 -m unittest tools.test_clip_recorder -v     # 이벤트 녹화: 가짜 cam2 JPEG → MP4, event_clip 상태 1→2→3, clip_info, 재시작
 python3 -m tools.fake_node --server 127.0.0.1       # 통신 시나리오: 질문 → 쓰러짐 선점 → confirm/resolve
 python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fall_alert 까지
@@ -212,6 +213,10 @@ vision_service ↔ control:
 | ↑ | `heartbeat` | `{"fps","cpu","cam1_fps","cam2_fps"}` | 2초마다 |
 | ↓ | `track_target` | `{"seat":2}` 또는 `{"seat":null}` | 추적 대상 변경 시 |
 | ↓ | `explain_request` | `{"event_id","kind","seat","situation","seq","status","queue_pos","elapsed_s","waiting_count","alert_stage","confirmed"}` (+선점 시 `preempted_kind`,`preempted_seat`) | [알림문구] 상황이 바뀔 때마다 (아래 표, 비동기) |
+| ↓ | `ask_request` | `{"ask_id","text","now"}` | [질의] 강사 질문을 넘김 (`now` = control 지역 시각) |
+| ↑ | `tool_call` | `{"ask_id","call_id","name","args"}` | [질의] LLM 이 고른 도구 실행 요청 |
+| ↓ | `tool_result` | `{"ask_id","call_id","name","result"}` | [질의] `hub/ask_tools.py` 실행 결과 (오류도 `{"error"}` 로) |
+| ↑ | `ask_answer` | `{"ask_id","text","mode":"gemini"\|"ollama"\|"rule"\|"default","tools":[{name,args,summary}],"took_s","fallback"}` | [질의] 최종 답 → 물어본 Console 로 그대로 |
 
 팬틸트: TCP 메시지가 아니다. `event_manager`의 `to="pantilt"` 할 일을 hub가 `PanTiltService` 메서드(preset·home·track·jog·save)로 부르고,
 팬틸트 알림(`pan_tilt_state`, `preset_saved`)은 이벤트 루프로 넘겨 받는다 (`hub/pantilt/README.md`).
@@ -234,6 +239,22 @@ control ↔ instructor_console:
 | ↑ | `pan_tilt_jog` / `preset_save` | `{dpan, dtilt}` / `{seat}` | 시설 관리 팬틸트 각도 등록 |
 | ↑ | `clip_request` | `{"event_id":17}` | 이벤트 창 '녹화 영상 다시 보기' |
 | ↓ | `clip_info` | `{event_id, status: "none"\|"recording"\|"saved"\|"deleted", started_at, ended_at, path}` | `clip_request` 응답. Console은 같은 노트북이라 `service/jarvis_DB/` + `path`를 직접 연다 |
+| ↑ | `ask` | `{"ask_id","text"}` (1~500자) | [질의] 강사 자연어 질문. vision 이 없으면 control 이 바로 `ask_answer mode=error` |
+| ↓ | `ask_answer` | 위 vision 표와 같음 | [질의] 답 + 근거 도구 목록 |
+
+[질의] 강사 자연어 질의 (기능 2, 10/22, 1차는 조회만):
+
+- LLM 은 vision(`ask.py`)에 있고, 데이터는 control 만 본다. LLM 이 고른 도구를 vision 이 `tool_call` 로 보내면
+  hub 가 `hub/ask_tools.py`(`AskTools.run`)로 실행해 `tool_result` 로 돌려준다. 판단 아님 → `event_manager` 를 거치지 않는다.
+- `ask_tools.py` 는 **읽기 전용**(SELECT 와 `EventManager.snapshot()`)이다. LLM 이 SQL 을 쓰지 않는다. 인자는 여기서 다시 검사.
+- **학생 이름을 내보내지 않는다** (좌석 번호로만 답하기로 결정). `seat_registration` 을 읽지 않는다.
+- 도구: `get_open_events`, `search_events(kind, seat, since, until, status, limit≤50)`, `get_event_timeline(event_id)`,
+  `get_stats(since, until)`, `get_device_status`, `get_class_condition(minutes)`. 시각은 control 지역 시간 `"YYYY-MM-DD HH:MM"`, `"today"`.
+  도구 설명은 vision `ask.py` 의 `TOOL_DECLS` 와 맞춘다.
+- 조치(확인·완료·오감지)는 2차 — "실행할까요?" 확인 단계를 붙여서.
+- 작은 모델 실수 받아 주기 (10/22): `until="today"` = 오늘 끝, `"yesterday"`/`"now"` 허용, 미래 `since` 는 고치라는 오류,
+  0건이면 `note`, 장비 상태는 `summary`·`"3분 전"`. 이름·조치 질문은 vision 이 LLM 없이 규칙으로 답한다(mode `rule`).
+- `ask_answer.fallback`: Gemini 등을 못 쓴 이유 목록 (예: `HTTP 429`). Console 에 보여 줄 수 있다.
 
 화면은 `event_update` 최신 값으로 덮어쓰기만 한다. 화면에서 상태를 계산하지 않는다.
 

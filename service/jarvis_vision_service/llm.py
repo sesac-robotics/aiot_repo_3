@@ -288,22 +288,22 @@ def explain_event(req: dict, cfg: dict, only: str | None = None) -> tuple[str, s
     for mode, fn, enabled, cooldown in steps:
         if not enabled or (only and only != mode):
             continue
-        name = f"{mode}({cfg.get(mode + '_model')})"         # 로그에 모델 이름까지
-        left = _skipping(mode) if not only else 0.0      # --only 시험 때는 항상 시도
+        name = f"{mode}({cfg.get(mode + '_model')})"         # 로그에 모델 이름까지. 실패 쉬기도 모델별 (한도가 모델별)
+        left = _skipping(name) if not only else 0.0      # --only 시험 때는 항상 시도
         if left:
             log.info("%s 건너뜀 (최근 실패, %.0f초 뒤 다시 시도) event=%s", name, left, req.get("event_id"))
             continue
         t0 = time.time()
         try:
             text = fn(req, cfg)
-            _mark_ok(mode)
+            _mark_ok(name)
             log.info("설명 %s (%.2fs) event=%s: %s", name, time.time() - t0, req.get("event_id"), text)
             return text, mode
         except LLMError as e:
-            _mark_failed(mode, float(cooldown))
+            _mark_failed(name, float(cooldown))
             log.warning("%s 실패 (%.2fs) event=%s: %s", name, time.time() - t0, req.get("event_id"), e)
         except Exception:                                   # 예상 못 한 오류도 다음 단계로
-            _mark_failed(mode, float(cooldown))
+            _mark_failed(name, float(cooldown))
             log.exception("%s 처리 중 오류 event=%s", name, req.get("event_id"))
     text = default_text(req)
     log.info("설명 default event=%s: %s", req.get("event_id"), text)

@@ -37,9 +37,11 @@ from dataclasses import dataclass
 from common.config import load_config
 from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
                              INCIDENT_TYPES, NOT_LOGGED_TYPES, FrameReader, MessageError, encode,
-                             STUDENT_NODES, make_message, parse_message, student_seat)
+                             STUDENT_NODES, make_message, parse_message, student_seat,
+                             VISION_NODE)                                  # [질의]
 from hub.control_config import (DB_PATH, SERVICE_DIR, ConfigError, clip_abs_path, clip_db_path,
                                 clip_dir, load_control_config)
+from hub.ask_tools import AskTools, fmt as fmt_time                       # [질의]
 from hub.db import CLIP_DELETED, CLIP_RECORDING, CLIP_SAVED, SYSTEM_NODE, Database, SchemaMismatch
 from hub.event_manager import PANTILT, RECORDER, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT, [녹화] RECORDER
 from hub.pantilt import PanTiltService                                    # [팬틸트]
@@ -99,6 +101,8 @@ class HubServer:
         if open_events:
             log.info("재시작 전 열린 이벤트 %d건 복구", len(open_events))
         self.events = EventManager(cfg, self.db.max_event_id() + 1, open_events)
+        self.ask_tools = AskTools(self.db, self.events)       # [질의] 읽기 전용 도구
+        self._asks: dict[int, str] = {}                       # [질의] ask_id -> 물어본 노드 (답을 돌려줄 곳)
         self.nodes: dict[str, NodeConn] = {}
         self.seq = 0
         # [팬틸트] 팬틸트 모듈은 run() 에서 이벤트 루프가 생긴 뒤 만든다 (on_event 를 루프로 넘기기 위해)
@@ -418,6 +422,21 @@ class HubServer:
         await self.apply(self.events.on_node_online(conn.name, False, time.time()))
 
     # ---- 메시지 처리 ---------------------------------------------------
+    async def on_ask(self, node: str, v: dict, rx_ts: float):        # [질의]
+        """강사 질문을 vision_service 로 넘긴다. vision 이 없으면 바로 답한다 (LLM 은 vision 에만 있다)."""
+        log.info("질의 #%s <- %s: %s", v["ask_id"], node, v["text"])
+        vision = self.nodes.get(VISION_NODE)
+        if vision is None or not vision.online:
+            await self.send(node, "ask_answer", {
+                "ask_id": v["ask_id"], "mode": "error", "tools": [], "took_s": 0.0,
+                "text": "AI 조교(vision_service)가 연결되어 있지 않아 답할 수 없습니다."})
+            return
+        if len(self._asks) > 100:                    # 답이 안 온 질문이 쌓이지 않게
+            self._asks.clear()
+        self._asks[v["ask_id"]] = node
+        await self.send(VISION_NODE, "ask_request", {"ask_id": v["ask_id"], "text": v["text"].strip(),
+                                                     "now": fmt_time(rx_ts)})
+
     async def on_message(self, conn: NodeConn, msg: dict, rx_ts: float):
         if conn.last_seq >= 0 and msg["seq"] != conn.last_seq + 1:
             log.debug("%s seq 불연속: %d -> %d", conn.name, conn.last_seq, msg["seq"])
@@ -451,6 +470,18 @@ class HubServer:
                 await self.apply(self.events.on_explain_text(
                     v["event_id"], v.get("text", ""), v.get("mode"), rx_ts,
                     seq=v.get("seq")))                                    # [알림문구] 늦은 응답 거르기
+        elif t == "ask":                                                # [질의] 강사 질문 -> vision 의 LLM
+            await self.on_ask(conn.name, v, rx_ts)
+        elif t == "tool_call":                                          # [질의] vision LLM 이 도구 실행 요청
+            result = self.ask_tools.run(v["name"], v.get("args") or {})
+            log.info("질의 #%s 도구 %s %s -> %s", v["ask_id"], v["name"], v.get("args"),
+                     result.get("error") or f"{len(str(result))}자")
+            await self.send(conn.name, "tool_result", {"ask_id": v["ask_id"], "call_id": v["call_id"],
+                                                       "name": v["name"], "result": result})
+        elif t == "ask_answer":                                         # [질의] vision -> 물어본 강사 화면
+            to = self._asks.pop(v["ask_id"], CONSOLE_NODE)
+            log.info("질의 #%s 답 [%s] %s", v["ask_id"], v.get("mode"), v.get("text", "")[:80])
+            await self.send(to, "ask_answer", v)
         elif t == "confirm":
             if "event_id" in v:
                 await self.apply(self.events.on_confirm(v["event_id"], rx_ts, conn.name))
