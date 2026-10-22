@@ -6,7 +6,7 @@
   - 저장값 없음     : 없는 쪽만 자동으로 등록 후 저장 (바른 자세가 먼저, 이어서 방향 측정)
 키: c 바른 자세만 다시 등록, z 방향만 다시 측정, Space 방향 측정 시작 — 끝나면 해당 값만 덮어쓴다.
 학생 화면(student_gui)은 키 대신 아래 공개 함수만 쓴다 (Monitor 내부 이름에 기대지 않게):
-  register(now) 바른 자세 등록 시작, next_zone(now) 방향 측정 다음 단계, zone_step 방향 측정 중인지,
+  register(now) 바른 자세 + 방향 다시 등록, next_zone(now) 방향 측정 다음 단계, zone_step 방향 측정 중인지,
   labels() 얼굴·자세 한글 이름, seat_calib.on_baseline_saved / on_zones_saved 저장이 끝났을 때 부를 함수
 """
 from monitor.seat_store import open_store
@@ -85,8 +85,9 @@ class CalibFlowMixin:
 
     # ---- 학생 화면용 공개 함수 --------------------------------------------------
     def register(self, now):
-        """[자리 등록]: 바른 자세 10초 등록 시작 (방향 측정값이 없으면 끝난 뒤 이어서 측정)"""
+        """[자리 등록]: 바른 자세 10초 → 이어서 방향 측정 (학습 얼굴 모델이면 저장값이 있어도 항상 다시 잰다)"""
         self.recalibrate(now)
+        self.face_stage.forget_zones()
 
     def next_zone(self, now):
         """[다음]: 방향 측정 다음 단계 (= Space)"""
