@@ -43,6 +43,13 @@ class FaceStage:
             self.zones = None
             self.zone_calib.start(now)
 
+    def forget_zones(self):
+        """[자리 등록]: 방향 값과 진행 중인 측정을 비운다 → 바른 자세 등록이 끝나면 calibrating()이 처음부터 다시 잰다
+        (저장 파일의 기존 값은 새 값을 저장할 때까지 남는다)"""
+        if not self.rule:
+            self.zones = None
+            self.zone_calib.active = self.zone_calib.waiting = False
+
     def go(self, now):
         """Space 키: 지금 영역 측정 시작"""
         self.zone_calib.go(now)
