@@ -224,5 +224,11 @@ __marimo__/
 *.db-shm
 *.db-wal
 
+# Seat 1 integration local artifacts
+.active_vision_backup/
+recordings/
+service/jarvis_vision_service/config/*.local.json
+service/jarvis_vision_service/logs/
+
 # 이벤트 녹화 파일 (Control 이 service/jarvis_DB/clips/{event_id}.mp4 로 저장, DB event_clip.path)
 service/jarvis_DB/clips/
