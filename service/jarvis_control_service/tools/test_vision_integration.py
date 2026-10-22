@@ -47,6 +47,15 @@ class IntegrationTest(unittest.TestCase):
             self.obs(1010.4+i*.1, hand=False)
         self.assertIsNone(self.manager.active)
 
+    def test_away_after_five_seconds(self):
+        self.obs(1000, hand=False)
+        for i in range(48):
+            self.obs(1000.1+i*.1, present=False, hand=None)
+        self.assertFalse(self.manager.events)          # 4.8초: 아직 아님
+        for i in range(4):
+            self.obs(1004.9+i*.1, present=False, hand=None)
+        self.assertEqual(self.manager.active.kind, 'away')
+
     def test_initial_empty_is_not_away(self):
         for i in range(130):
             self.obs(1000+i*.1, present=False, hand=None)
@@ -57,6 +66,43 @@ class IntegrationTest(unittest.TestCase):
             self.obs(1000+i*.1)
         self.obs(1005)
         self.assertFalse(self.manager.events)
+
+    # ---- 관측을 못 쓰는 이유는 조용히 넘기지 않고 경고한다 ----------------------
+    def obs_skewed(self, t, skew):
+        """카메라 PC 시계가 Control 보다 skew 초 늦은 관측"""
+        self.fid += 1
+        v = dict(session='test', frame_id=self.fid, captured_at=t-skew, processed_at=t,
+                 seats=[dict(seat=1, present=True, hand_up=True)])
+        return self.manager.on_seat_obs(v, t)
+
+    def test_clock_skew_drops_are_warned(self):
+        with self.assertLogs('event_manager', 'WARNING') as cm:
+            for i in range(40):
+                self.obs_skewed(1000+i*.1, skew=.9)
+        self.assertFalse(self.manager.events)                    # 버려서 사건은 없고
+        self.assertIn('시계', cm.output[0])                       # 이유를 알린다
+        self.assertEqual(len(cm.output), 1)                      # 10초에 한 번만
+
+    def test_slow_observations_are_warned(self):
+        with self.assertLogs('event_manager', 'WARNING') as cm:
+            for i in range(8):
+                self.obs(1000+i*1.0)                             # 1 fps: 0.8초 증거 간격보다 김
+        self.assertFalse(self.manager.events)
+        self.assertIn('느려', cm.output[0])
+
+    def test_normal_rate_has_no_warning(self):
+        import logging
+        log = logging.getLogger('event_manager')
+        seen = []
+        handler = logging.Handler(); handler.emit = lambda r: seen.append(r) if r.levelno >= logging.WARNING else None
+        log.addHandler(handler)
+        try:
+            for i in range(23):
+                self.obs(1000+i*.1)
+        finally:
+            log.removeHandler(handler)
+        self.assertEqual(len(self.manager.events), 1)
+        self.assertEqual(seen, [])
 
     def test_duplicate_frames_and_stale_rejected(self):
         self.obs(1000)

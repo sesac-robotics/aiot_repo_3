@@ -27,6 +27,9 @@ SYSTEM = "system"
 PANTILT = "pantilt"                                  # [팬틸트] hub 가 PanTiltService 호출로 바꾸는 목적지
 KIND_CODE = {"fall": 1, "question": 2, "away": 3}    # [팬틸트] 팬틸트·LED 는 숫자 코드 (1 빨강·2 파랑·3 초록)
 PANTILT_SAFE = 7                                     # [팬틸트] pan_tilt_state.state 7 = SAFE (Uno 통신 오류)
+OBS_GAP_S = .8                                       # seat_obs 증거가 이어지는 최대 간격 (이보다 길면 처음부터)
+OBS_WARN_S = 10.0                                    # seat_obs 를 못 쓴 이유를 경고하는 주기
+AWAY_S = 5.0                                         # 빈자리가 이만큼 이어지면 자리비움 (10/22 시험: 10초 -> 5초, 3초는 오탐 증가)
 
 # help_event 표에 저장하는 값 (문자열 그대로. 숫자 코드로 바꾸는 일은 db.py 가 한다)
 # reg_id·gen 은 db.py 가 채운다. source 는 DB 에 없다 (event_log detect 의 detail 에만).
@@ -118,6 +121,10 @@ class EventManager:
         self._seat_states = {}
         self._obs_session = None
         self._obs_frame = -1
+        self._obs_last_rx: float | None = None           # 마지막 seat_obs 를 받은 Control 시각
+        self._obs_drops = {'clock': 0, 'slow': 0}        # 경고 사이에 쌓인 개수
+        self._obs_worst = {'clock': 0.0, 'slow': 0.0}    # 그 사이 가장 큰 시계 차이 / 관측 간격 (초)
+        self._obs_warned_at = None
         self._fx = Effects()
 
         for ev in open_events:
@@ -136,8 +143,17 @@ class EventManager:
     # =====================================================================
     def on_seat_obs(self, value, now):
         # Observations are not incidents. Only this central process confirms them.
-        if not -.2 <= now-value['captured_at'] <= .8:
+        age = now - value['captured_at']
+        if not -.2 <= age <= .8:
+            # 촬영 PC 와 Control 시계가 어긋나면(-0.2~0.8초 밖) 관측이 전부 버려져 사건이 안 생긴다.
+            # 조용히 버리면 원인을 찾기 어려우므로 몇 개를 버렸는지 10초마다 알린다.
+            self._obs_drop(now, 'clock', age)
             return Effects()
+        if self._obs_last_rx is not None and now - self._obs_last_rx > OBS_GAP_S:
+            # 관측 간격이 증거 간격(0.8초)보다 길면 손들기·자리비움 판정이 매번 처음부터 다시 시작된다
+            # (Vision 분석이 약 1.25 fps 보다 느림). 사건이 안 생기는 이유를 알린다.
+            self._obs_drop(now, 'slow', now - self._obs_last_rx)
+        self._obs_last_rx = now
         if value['session'] != self._obs_session:
             self._obs_session, self._obs_frame = value['session'], -1
             self._seat_states.clear()
@@ -154,7 +170,7 @@ class EventManager:
             seat = row['seat']
             s = self._seat_states.setdefault(seat, {
                 'seen': False, 'armed': True, 'down_sent': False,
-                **{k: Evidence(.8) for k in ('up', 'down', 'away', 'back')}})
+                **{k: Evidence(OBS_GAP_S) for k in ('up', 'down', 'away', 'back')}})
             p, h = row['present'], row['hand_up']
             if p is True:
                 s['seen'] = True
@@ -167,11 +183,29 @@ class EventManager:
                     incident('question', seat, 'end')
                 s['armed'], s['down_sent'] = True, True
             absent = None if p is None or not s['seen'] else not p
-            if s['away'].update(absent, now, 10.) and not self._find_open(seat, 'away'):
+            if s['away'].update(absent, now, AWAY_S) and not self._find_open(seat, 'away'):
                 incident('away', seat, 'start')
             if s['back'].update(p, now, 2.) and self._find_open(seat, 'away'):
                 incident('away', seat, 'end')
         return out
+
+    def _obs_drop(self, now, why, amount):
+        """seat_obs 를 쓰지 못한 이유를 모아 OBS_WARN_S 마다 한 줄로 경고한다 (판정에는 영향 없음)."""
+        self._obs_drops[why] += 1
+        self._obs_worst[why] = max(self._obs_worst[why], abs(amount))
+        if self._obs_warned_at is not None and now - self._obs_warned_at < OBS_WARN_S:
+            return
+        self._obs_warned_at = now
+        if self._obs_drops['clock']:
+            log.warning("seat_obs %d건 버림: 촬영 시각과 Control 시계 차이 최대 %.2f초 (허용 -0.2~0.8초). "
+                        "카메라 PC 와 Control PC 의 시계를 맞추세요 (NTP)",
+                        self._obs_drops['clock'], self._obs_worst['clock'])
+        if self._obs_drops['slow']:
+            log.warning("seat_obs 간격 최대 %.2f초 (%d회): Vision 분석이 너무 느려 손들기·자리비움이 확정되지 않습니다 "
+                        "(관측 간격 %.1f초 이하 = 약 %.2f fps 이상 필요)",
+                        self._obs_worst['slow'], self._obs_drops['slow'], OBS_GAP_S, 1 / OBS_GAP_S)
+        self._obs_drops = {'clock': 0, 'slow': 0}
+        self._obs_worst = {'clock': 0.0, 'slow': 0.0}
 
     def on_incident(self, kind: str, seat: int, state: str, now: float,
                     source: str | None = None) -> Effects:
