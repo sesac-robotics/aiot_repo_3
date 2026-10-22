@@ -5,8 +5,8 @@
   개별 drowsy·yawn·not_forward·forward_lean·head_tilt·shoulder_tilt (값은 monitor/condition.py to_summary)
 - event_id: Control이 fall_alert에 event_id를 실어 보내면 fall_confirm에 그대로 돌려준다 (지금 hub는 안 보냄).
   끊긴 동안 쌓였다 늦게 간 확인이 같은 자리의 '새' 쓰러짐을 확인하지 않게 Control이 가려낼 수 있도록.
-- 자리 등록(seat_register)은 Interface Spec v1.1에 정의됐지만 아직 common/protocol.py에 없다.
-  protocol.py에 추가되면 자동으로 보내고, 그 전에는 학생 노트북에만 저장한다.
+- 보냄: seat_register {student_name, baseline, zones} — [자리 등록]. Control이 DB에 저장하고 강사 화면에 이름을 띄운다.
+  끊긴 동안 눌렀으면 NodeClient가 모아 두었다가 다시 접속하면 보낸다. 학생 노트북에도 같이 저장한다.
 - 하트비트에 노트북 카메라 상태(cam_ok)를 같이 싣는다 (강사 화면 학생 정보 창).
 """
 import logging

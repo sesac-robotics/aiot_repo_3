@@ -223,3 +223,6 @@ __marimo__/
 *.db
 *.db-shm
 *.db-wal
+
+# 이벤트 녹화 파일 (Control 이 service/jarvis_DB/clips/{event_id}.mp4 로 저장, DB event_clip.path)
+service/jarvis_DB/clips/

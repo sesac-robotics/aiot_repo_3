@@ -2,14 +2,15 @@
 가짜 노드: control 과의 TCP 통신, 이벤트 관리, DB 기록을 시험한다 (상세 설계 9장 "통신").
 
 모드 (--node 또는 아래 NODE 값):
-- scenario : vision_service · instructor_console · camera_controller · student_client_1~4 를
+- scenario : vision_service · instructor_console · student_client_1~4 를
              한 프로세스에서 모두 띄워 아래 흐름을 돌린다. (기본)
-               1) 2번 좌석 질문 start      -> event_update, queue_state, track_target, pan_tilt preset
+             팬틸트는 TCP 노드가 아니라 hub 안의 모듈이라 여기서 흉내 내지 않는다 (hub --pantilt-sim 으로 확인).
+               1) 2번 좌석 질문 start      -> event_update, queue_state, track_target
                2) 3번 좌석 쓰러짐 start    -> 선점 (쓰러짐이 active, 질문은 waiting)
                3) 강사 confirm(쓰러짐) -> resolve(쓰러짐) -> 질문이 다시 active
-               4) 강사 confirm(질문) -> resolve(질문) -> 대기열 비움, pan_tilt home
+               4) 강사 confirm(질문) -> resolve(질문) -> 대기열 비움, track_target 없음
              --fall-wait 를 주면 2)에서 그 초만큼 기다려 15초/30초 fall_alert 도 볼 수 있다.
-- vision_service / instructor_console / camera_controller / student_client_N :
+- vision_service / instructor_console / student_client_N :
              그 이름으로 접속해서 받은 메시지를 출력한다. vision_service 는 2번 좌석 질문을 한 번 보낸다.
              Ctrl+C 로 끝.
 
@@ -33,14 +34,14 @@ if __package__ in (None, ""):                 # tools/fake_node.py 를 직접 �
 
 from common.config import load_config          # noqa: E402
 from common.node_client import NodeClient      # noqa: E402
-from common.protocol import (CAMERA_NODE, CONSOLE_NODE, STUDENT_NODES,  # noqa: E402
+from common.protocol import (CONSOLE_NODE, STUDENT_NODES,  # noqa: E402
                              VISION_NODE)
 
 # ---- Run Code 로 실행할 때 모드 (옵션 --node 가 있으면 그게 우선) -----------
-NODE = "scenario"        # scenario / vision_service / instructor_console / camera_controller / student_client_1~4
+NODE = "scenario"        # scenario / vision_service / instructor_console / student_client_1~4
 # ---------------------------------------------------------------------------
 
-ALL_NODES = [VISION_NODE, CONSOLE_NODE, CAMERA_NODE, *STUDENT_NODES]
+ALL_NODES = [VISION_NODE, CONSOLE_NODE, *STUDENT_NODES]
 SHOW = {"event_update", "queue_state", "device_update", "snapshot", "class_condition",
         "track_target", "explain_request", "pan_tilt", "fall_alert", "fall_alert_cancel"}
 
@@ -80,8 +81,6 @@ class FakeNode:
             self.client.send("explain_text", value={
                 "event_id": v["event_id"], "mode": "default",
                 "text": f"{v['seat']}번 좌석 {v['kind']} (가짜 설명)"})
-        elif self.node == CAMERA_NODE and t == "pan_tilt":
-            self.client.send("pan_tilt_state", value={"pan": 90, "tilt": 85, "ok": True})
 
     def wait_for(self, type_: str, pred=lambda v: True, timeout_s: float = 3.0):
         """type_ 이고 pred(value) 가 참인 메시지가 올 때까지 기다린다."""
@@ -127,7 +126,6 @@ def run_scenario(cfg: dict, fall_wait_s: float):
         q_id = ev_of(2, "question")
         console.wait_for("queue_state", lambda v: v["active"] == q_id)
         vision.wait_for("track_target", lambda v: v["seat"] == 2)
-        nodes[CAMERA_NODE].wait_for("pan_tilt", lambda v: v.get("seat") == 2)
         vision.client.send("track_offset", seat=2, value={"found": True, "dx": 0.1, "dy": -0.05})
 
         print("\n2) 3번 좌석 쓰러짐 start -> 선점")
@@ -137,10 +135,10 @@ def run_scenario(cfg: dict, fall_wait_s: float):
         vision.wait_for("track_target", lambda v: v["seat"] == 3)
         if fall_wait_s > 0:
             print(f"   ... {fall_wait_s:.0f}초 기다리며 단계 알림 확인")
-            nodes["student_client_2"].wait_for("fall_alert", lambda v: v["stage"] == "neighbor",
-                                               timeout_s=fall_wait_s)
+            nodes["student_client_4"].wait_for("fall_alert", lambda v: v["stage"] == "neighbor",
+                                               timeout_s=fall_wait_s)        # 3번의 옆자리 (2×2: 1, 4)
             if fall_wait_s >= 30:
-                nodes["student_client_1"].wait_for("fall_alert", lambda v: v["stage"] == "all",
+                nodes["student_client_2"].wait_for("fall_alert", lambda v: v["stage"] == "all",
                                                    timeout_s=fall_wait_s)
 
         print("\n3) 강사 confirm -> resolve (쓰러짐)")
@@ -154,7 +152,7 @@ def run_scenario(cfg: dict, fall_wait_s: float):
         console.client.send("confirm", value={"event_id": q_id})
         console.client.send("resolve", value={"event_id": q_id})
         console.wait_for("queue_state", lambda v: v["active"] is None and not v["waiting"])
-        nodes[CAMERA_NODE].wait_for("pan_tilt", lambda v: v.get("mode") == "home")
+        vision.wait_for("track_target", lambda v: v["seat"] is None)
         print("\n성공: 질문 1건 + 쓰러짐 선점이 끝까지 흘렀습니다. (DB: db/hub.db 의 help_event, event_log)")
         return True
     except TimeoutError as e:

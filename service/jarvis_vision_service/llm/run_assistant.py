@@ -6,6 +6,10 @@ vision_service 노드 실행 파일. VS Code에서 이 파일을 열고 Run Code
 - 사건(fall/question/away)은 판정이 확정·해제되는 순간 한 번만 보낸다. 유지 시간은 여기서 지킨다.
 - track_target 을 받으면 그 좌석을 추적하며 track_offset 을 10~15회/초 보낸다.
 - explain_request 를 받으면 LLM(Gemini 기본, Ollama 백업) 설명을 explain_text 로 돌려준다.
+- [질의] ask_request 를 받으면 ask.py 가 LLM tool calling 으로 답을 만들어 ask_answer 로 돌려준다
+  (도구는 tool_call 로 control 에 실행을 맡긴다).
+- [리포트] report_write 를 받으면 report.py 가 오늘 숫자를 읽고 요약·살펴볼 점을 써서 report_text 로 돌려준다.
+  control 은 상황이 바뀔 때마다(새 사건, 쓰러짐 15/30초, 일어남, 손 내림, 자리비움 미복귀) 다시 요청한다.
 
 터미널에서는:  python3 run_assistant.py [--server 127.0.0.1]
 """
@@ -24,15 +28,29 @@ from common.config import load_config          # noqa: E402
 from common.node_client import NodeClient      # noqa: E402
 from common.protocol import VISION_NODE        # noqa: E402
 
+import ask                                     # noqa: E402  [질의] 강사 자연어 질의 + tool calling
+import llm                                     # noqa: E402  AI 조교 설명 (Gemini → Ollama → 기본 문구)
+import report                                  # noqa: E402  [리포트] 수업 종료 리포트 문장
+from assistant_config import load_assistant_config   # noqa: E402
+
 LOOP_FPS = 15            # 감지 루프 목표 속도 (초당 반복 횟수)
 
 track_seat = None        # 지금 추적할 좌석 (control 의 track_target 으로 바뀜)
+
+LLM_CFG = load_assistant_config()                                     # config/assistant.yaml + .env
+explain_slots = threading.Semaphore(int(LLM_CFG.get("max_concurrent", 2)))   # 동시 설명 요청 수 제한
+asker: "ask.AskWorker | None" = None                                  # [질의] main() 에서 client 와 함께 만든다
+reporter: "report.ReportWorker | None" = None                         # [리포트]
 
 
 def on_message(client: NodeClient, msg: dict):
     """control 이 보낸 메시지 (수신 스레드에서 불림)."""
     global track_seat
     t, v = msg["type"], msg["value"]
+    if asker is not None and asker.on_message(msg):     # [질의] ask_request / tool_result
+        return
+    if reporter is not None and reporter.on_message(msg):   # [리포트] report_write
+        return
     if t == "track_target":
         track_seat = v.get("seat")
         print(f"<- track_target: {track_seat}")
@@ -42,10 +60,20 @@ def on_message(client: NodeClient, msg: dict):
 
 
 def explain(client: NodeClient, req: dict):
-    """TODO: LLM 으로 상황 설명 만들기 (Gemini -> 실패하면 Ollama -> 실패하면 기본 문구).
+    """LLM 으로 상황 설명을 만들어 explain_text 로 돌려준다 (Gemini -> Ollama -> 기본 문구).
+    llm.explain_event 는 예외를 던지지 않고 항상 (문자열, "gemini"|"ollama"|"default") 를 준다.
     text 는 꼭 문자열로 보낸다 (control 이 문자열이 아니면 버림)."""
-    client.send("explain_text", value={"event_id": req["event_id"],
-                                       "text": f"{req['seat']}번 좌석 {req['kind']}", "mode": "default"})
+    with explain_slots:                     # 사건이 몰려도 LLM 을 동시에 너무 많이 부르지 않게
+        try:
+            text, mode = llm.explain_event(req, LLM_CFG)
+        except Exception:                   # 혹시 모를 오류에도 기본 문구는 꼭 보낸다
+            logging.getLogger("llm").exception("설명 실패 event=%s", req.get("event_id"))
+            text, mode = llm.default_text(req), "default"
+    value = {"event_id": req["event_id"], "text": str(text), "mode": mode}
+    if "seq" in req:                        # control 이 늦게 온 옛 응답을 거를 수 있게 그대로 돌려준다
+        value["seq"], value["situation"] = req["seq"], req.get("situation")
+    client.send("explain_text", value=value)
+    print(f"-> explain_text event={req['event_id']} {req.get('situation', 'detect')} [{mode}] {text}")
 
 
 def detect() -> dict:
@@ -71,7 +99,18 @@ def main():
 
     client = NodeClient(VISION_NODE, cfg["control_host"], int(cfg["control_port"]),
                         on_message=lambda m: on_message(client, m))
+    global asker, reporter
+    reporter = report.ReportWorker(client, LLM_CFG, on_done=lambda req, res: print(
+        f"-> report_text #{req['report_id']} [{res['mode']} {res['took_s']}s] {res['summary'][:80]}"))
+    asker = ask.AskWorker(client, LLM_CFG, on_answer=lambda req, res: print(
+        f"-> ask_answer #{req['ask_id']} [{res['mode']} {res['took_s']}s, 도구 {len(res['tools'])}번] {res['text'][:80]}"))
     client.start()
+
+    # Ollama 모델을 미리 GPU 에 올려 둔다 (첫 설명이 느리지 않게). 감지 루프를 막지 않게 따로 돌린다.
+    print(f"AI 조교: gemini={LLM_CFG['gemini_model'] if LLM_CFG.get('gemini_api_key') else '키 없음(건너뜀)'}"
+          f", ollama={LLM_CFG['ollama_model']}")
+    if LLM_CFG.get("ollama_warmup", True):
+        threading.Thread(target=llm.warmup, args=(LLM_CFG,), daemon=True).start()
     print(f"{VISION_NODE}: control {cfg['control_host']}:{cfg['control_port']} 에 접속 중... (Ctrl+C 로 끝)")
 
     prev: dict = {}                  # 직전 상태 (변화 감지용)

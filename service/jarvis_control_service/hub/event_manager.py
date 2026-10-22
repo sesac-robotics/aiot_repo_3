@@ -7,6 +7,15 @@
 - 시계는 항상 인자로 받는다(now = control 시계 rx_ts). 가짜 시계로 테스트할 수 있다.
 - [팬틸트] 팬틸트는 Control 내부 모듈(hub/pantilt)이다. to="pantilt" 인 Send 는
   hub 가 PanTiltService 메서드 호출로 바꿔 실행한다 (TCP 로 보내지 않음).
+- [알림문구] 상황이 바뀌는 순간(새 사건·선점, 쓰러짐 15/30초, 일어남, 손 내림, 자리비움 미복귀)마다
+  vision_service 에 explain_request {situation, ...} 를 보내 강사용 알림 문구를 다시 만든다.
+  응답 explain_text 의 seq 가 마지막 요청과 다르면(늦게 온 옛 응답) 버린다.
+- [수동보기] 강사가 "1번 좌석 보여줘" 하면 열린 이벤트가 없을 때만 팬틸트를 그 좌석으로 돌린다 (LED 끔).
+  이벤트를 추적 중이면 거절한다. view_hold_s(60초) 뒤 원위치, 그 전에 새 이벤트가 오면 바로 그 이벤트로 넘어간다.
+  상태가 바뀌면 Console 에 view_state {seat, until, by} 를 보낸다 (seat=None 이면 끝).
+- [녹화] 이벤트 녹화(event_clip)를 언제 시작·끝낼지도 여기서 정한다. to="recorder" 인 Send
+  (start {event_id, seat, kind} / stop {event_id}) 를 hub 가 ClipRecorder(hub/clip_recorder.py) 호출과
+  db.py 기록으로 바꾼다. 녹화 구간 = 이벤트 확정(detect) ~ 종료(resolve·dismiss·expire·clear).
 
 상태: active(추적 중) / waiting(대기열) / closed(종료) 세 가지뿐.
 confirm 은 상태가 아니다. confirmed_at 을 기록하고 단계 알림만 멈춘다.
@@ -26,6 +35,8 @@ SYSTEM = "system"
 PANTILT = "pantilt"                                  # [팬틸트] hub 가 PanTiltService 호출로 바꾸는 목적지
 KIND_CODE = {"fall": 1, "question": 2, "away": 3}    # [팬틸트] 팬틸트·LED 는 숫자 코드 (1 빨강·2 파랑·3 초록)
 PANTILT_SAFE = 7                                     # [팬틸트] pan_tilt_state.state 7 = SAFE (Uno 통신 오류)
+KIND_KO = {"fall": "쓰러짐", "question": "질문", "away": "자리비움"}   # [수동보기] 거절 안내 문장용
+RECORDER = "recorder"                                # [녹화] hub 가 ClipRecorder 호출 + event_clip 기록으로 바꾸는 목적지
 
 # help_event 표에 저장하는 값 (문자열 그대로. 숫자 코드로 바꾸는 일은 db.py 가 한다)
 # reg_id·gen 은 db.py 가 채운다. source 는 DB 에 없다 (event_log detect 의 detail 에만).
@@ -54,6 +65,8 @@ class HelpEvent:
     # ---- 화면 표시용 (DB 에는 없음) ----
     risen: bool = False            # fall end: 일어남 (닫지 않음, 사람이 판단)
     overdue: bool = False           # away 가 away_alert_s 지나도록 미복귀
+    explain_seq: int = 0            # [알림문구] 마지막 explain_request 번호 (늦은 응답 거르기)
+    explain_situation: str | None = None   # [알림문구] 지금 explain_text 가 설명하는 상황
 
     @property
     def is_open(self) -> bool:
@@ -102,6 +115,7 @@ class EventManager:
         self.question_expire_s = float(t["question_expire_s"])
         self.away_alert_s = float(t["away_alert_s"])
         self.class_condition_s = float(t.get("class_condition_s", 10))
+        self.view_hold_s = float(t.get("view_hold_s", 60))     # [수동보기] 강사가 고른 좌석을 비추는 시간
         # [팬틸트] nudge_min_interval, nudge_gain 삭제 — P 제어(보정량 계산)는 팬틸트 모듈이 한다
 
         self.next_id = next_event_id
@@ -114,6 +128,7 @@ class EventManager:
         self.gen = 0                                     # [팬틸트] 추적 대상(active 사건)이 바뀔 때마다 +1
         self._target_id: int | None = None               # [팬틸트] 마지막으로 팬틸트에 보낸 active 사건 (좌석 대신)
         self.pan_tilt: dict = {}                         # [팬틸트] 마지막 pan_tilt_state {state, pan, tilt, gen, error}
+        self.view: dict | None = None                    # [수동보기] {"seat", "until", "by"} — 이벤트가 없을 때만
         self._fx = Effects()
 
         for ev in open_events:
@@ -123,7 +138,10 @@ class EventManager:
             self.next_id = max(self.next_id, ev.event_id + 1)
 
     def start(self, now: float) -> Effects:              # [팬틸트] 추가
-        """hub 가 시작 직후 한 번 호출. 복구된 active 사건 좌석으로 팬틸트·Vision 을 맞춘다."""
+        """hub 가 시작 직후 한 번 호출. 복구된 active 사건 좌석으로 팬틸트·Vision 을 맞춘다.
+        [녹화] 재시작 전에 열려 있던 이벤트는 녹화를 새로 시작한다 (끊긴 녹화는 hub 가 DB 에서 닫는다)."""
+        for ev in self._sorted_open():                                  # [녹화]
+            self._record_start(ev)                                      # [녹화]
         self._reschedule(now)
         return self._flush()
 
@@ -140,22 +158,25 @@ class EventManager:
                 if ev.hand_down or ev.risen:          # 다시 손을 듦 / 다시 쓰러짐
                     ev.hand_down = ev.risen = False
                     self._update(ev)
+                    self._explain(ev, now, "again")    # [알림문구]
                 return self._flush()
             ev = HelpEvent(event_id=self.next_id, seat=seat, kind=kind,
                            priority=self.priority[kind], status="waiting",
                            detected_at=now, source=source)
             self.next_id += 1
             self.events[ev.event_id] = ev
+            prev_active = self.active                 # [알림문구] 선점 여부를 알려 주려고
             self._save(ev)
             self._log(ev, now, "detect", SYSTEM, {"source": source})
+            self._record_start(ev)                  # [녹화] 확정 시각부터 cam2 녹화
             self._reschedule(now)                   # active 가 되면 거기서 event_update 를 보냄
             if ev.status == "waiting":
                 self._log(ev, now, "wait", SYSTEM)
                 self._update(ev)
-            self._send(VISION_NODE, "explain_request", {
-                "event_id": ev.event_id, "kind": kind, "seat": seat,
-                "elapsed_s": round(now - ev.detected_at, 1),
-                "waiting_count": sum(1 for e in self.events.values() if e.status == "waiting")})
+            preempted = prev_active if (prev_active is not None and ev.status == "active") else None
+            self._explain(ev, now, "detect",                                      # [알림문구]
+                          {"preempted_kind": preempted.kind, "preempted_seat": preempted.seat}
+                          if preempted else None)
             return self._flush()
 
         # ---- end ----
@@ -165,10 +186,13 @@ class EventManager:
             if not ev.hand_down:
                 ev.hand_down = True
                 self._update(ev)
+                self._explain(ev, now, "hand_down")    # [알림문구]
         elif kind == "fall":                   # 자동으로 닫지 않는다. "일어남" 표시만
             if not ev.risen:
                 ev.risen = True
                 self._update(ev)
+                if ev.confirmed_at is None:           # [알림문구] 확인 전이면 "일어났지만 확인 필요"
+                    self._explain(ev, now, "fall_risen")
         elif kind == "away":                   # 복귀 -> 종료
             self._close(ev, now, "cleared", "clear", SYSTEM)
             self._reschedule(now)
@@ -194,19 +218,62 @@ class EventManager:
 
     def on_resolve(self, event_id: int, now: float, by: str) -> Effects:
         """강사 화면의 "완료". 이벤트 종료 후 다음 대상."""
+        return self._end_by_instructor(event_id, now, by, "resolved", "resolve")
+
+    def on_dismiss(self, event_id: int, now: float, by: str) -> Effects:
+        """강사 화면의 "오감지". 잘못 감지된 이벤트로 닫는다 (close_reason false_alarm). 나머지는 완료와 같다."""
+        return self._end_by_instructor(event_id, now, by, "false_alarm", "dismiss")
+
+    def _end_by_instructor(self, event_id: int, now: float, by: str, reason: str, action: str) -> Effects:
         ev = self.events.get(event_id)
         if ev is None:
-            log.warning("resolve: 열린 이벤트 %s 없음", event_id)
+            log.warning("%s: 열린 이벤트 %s 없음", action, event_id)
             return self._flush()
         if ev.kind == "fall" and ev.alert_stage != "none" and ev.confirmed_at is None:
-            self._cancel_fall_alert(ev)
-        self._close(ev, now, "resolved", "resolve", by)
+            self._cancel_fall_alert(ev)          # 알림 받은 학생 화면의 알림을 내린다
+        self._close(ev, now, reason, action, by)
         self._reschedule(now)
         return self._flush()
 
-    def on_explain_text(self, event_id: int, text: str, mode: str | None, now: float) -> Effects:
+    # ---- [수동보기] 강사가 고른 좌석 비추기 ----
+    def on_view_request(self, seat: int | None, now: float, by: str) -> tuple[Effects, dict]:
+        """seat=None 이면 원위치. (할 일, 결과) 를 돌려준다. 결과는 AI 조교·화면이 그대로 안내에 쓴다:
+        {"ok": True, "seat", "hold_s"} / {"ok": False, "reason": "tracking"|"pantilt_off"|"bad_seat", ...}"""
+        if seat is None:
+            if self.view is None:
+                return self._flush(), {"ok": True, "home": True, "note": "이미 원위치(수동 보기 없음)"}
+            self._end_view("request")
+            self._reschedule(now)
+            return self._flush(), {"ok": True, "home": True}
+        if seat not in self.seats:
+            return self._flush(), {"ok": False, "reason": "bad_seat", "message": f"{seat}번 좌석은 없습니다 (1~4)"}
+        cur = self.active
+        if cur is not None:                       # 이벤트 추적이 먼저 (10/22 결정: 추적 중이면 거절)
+            return self._flush(), {"ok": False, "reason": "tracking",
+                                   "tracking": {"event_id": cur.event_id, "seat": cur.seat, "kind": cur.kind},
+                                   "message": f"지금 {cur.seat}번 좌석 {KIND_KO.get(cur.kind, cur.kind)} 이벤트를 추적 중이라 "
+                                              "카메라를 돌릴 수 없습니다"}
+        pt = self.devices.get(PANTILT)
+        if pt is not None and not pt["online"]:
+            return self._flush(), {"ok": False, "reason": "pantilt_off", "message": "팬틸트가 동작하지 않습니다 (SAFE)"}
+        self.view = {"seat": seat, "until": now + self.view_hold_s, "by": by}
+        log.info("수동 보기: %s번 좌석 (%s, %.0f초)", seat, by, self.view_hold_s)
+        self._send(CONSOLE_NODE, "view_state", dict(self.view))
+        self._reschedule(now)
+        return self._flush(), {"ok": True, "seat": seat, "hold_s": self.view_hold_s}
+
+    def _end_view(self, why: str):
+        log.info("수동 보기 끝: %s번 좌석 (%s)", self.view["seat"] if self.view else None, why)
+        self.view = None
+        self._send(CONSOLE_NODE, "view_state", {"seat": None, "until": None, "by": None, "why": why})
+
+    def on_explain_text(self, event_id: int, text: str, mode: str | None, now: float,
+                        seq: int | None = None) -> Effects:
         ev = self.events.get(event_id)
         if ev is None:
+            return self._flush()
+        if seq is not None and seq != ev.explain_seq:    # [알림문구] 더 새 요청이 나간 뒤 늦게 온 옛 응답
+            log.info("explain_text 무시: event %s seq %s (최신 %s)", event_id, seq, ev.explain_seq)
             return self._flush()
         ev.explain_text, ev.explain_mode = text, mode
         self._save(ev)
@@ -306,7 +373,12 @@ class EventManager:
                 ev.overdue = True
                 self._log(ev, now, "alert", SYSTEM, {"stage": "away_overdue"})
                 self._update(ev)
-        # 4. 대기열 맨 앞이 바뀌었으면 교체
+                self._explain(ev, now, "away_overdue")  # [알림문구]
+        # 4. [수동보기] 시간이 다 되면 원위치
+        if self.view is not None and now >= self.view["until"]:
+            self._end_view("timeout")
+            changed = True
+        # 5. 대기열 맨 앞이 바뀌었으면 교체
         if changed:
             self._reschedule(now)
         # 반 집계 (class_condition_s 마다)
@@ -359,11 +431,17 @@ class EventManager:
                 self.active_id = None
         # [팬틸트] 추적 대상(active 사건)이 바뀌었으면 gen+1 후 팬틸트와 Vision 에 알린다.
         # 좌석이 아니라 사건으로 비교한다: 같은 좌석에서 질문 → 쓰러짐으로 바뀌어도 LED·gen 이 바뀌어야 함
-        target_id = head.event_id if head is not None else None              # [팬틸트]
+        if head is not None and self.view is not None:                       # [수동보기] 이벤트가 오면 수동 보기는 끝
+            self._end_view("event")
+        target_id = head.event_id if head is not None else (                 # [팬틸트]
+            ("view", self.view["seat"]) if self.view else None)              # [수동보기] 이벤트 없으면 수동 좌석
         if target_id != self._target_id:                                     # [팬틸트]
             self._target_id = target_id                                      # [팬틸트]
             self.gen += 1                                                    # [팬틸트]
-            if head is not None:                                             # [팬틸트]
+            if head is None and self.view is not None:                       # [수동보기] LED 끈 채로 좌석 이동
+                self._send(PANTILT, "preset", {"gen": self.gen, "seat": self.view["seat"], "kind": 0})
+                self._send(VISION_NODE, "track_target", {"seat": self.view["seat"], "gen": self.gen})
+            elif head is not None:                                           # [팬틸트]
                 self._send(PANTILT, "preset", {"gen": self.gen, "seat": head.seat,
                                                "kind": KIND_CODE[head.kind]})   # [팬틸트] 좌석 이동 + LED
                 self._send(VISION_NODE, "track_target", {"seat": head.seat, "gen": self.gen})   # [팬틸트] gen 추가
@@ -394,6 +472,7 @@ class EventManager:
         self._save(ev)
         self._log(ev, now, action, actor)
         self._update(ev)
+        self._send(RECORDER, "stop", {"event_id": ev.event_id})        # [녹화] 완료·오감지·만료·복귀 = 녹화 끝
 
     def _fall_alert(self, ev: HelpEvent, now: float, stage: str):
         ev.alert_stage = stage
@@ -402,6 +481,7 @@ class EventManager:
         self._update(ev)
         self._send_students(self._alert_targets(ev), "fall_alert",
                             {"target_seat": ev.seat, "stage": stage})
+        self._explain(ev, now, "fall_" + stage)                       # [알림문구] fall_neighbor / fall_all
 
     def _alert_targets(self, ev: HelpEvent) -> list[str]:
         """지금 alert_stage 에서 fall_alert 를 받은 학생 노드들."""
@@ -410,6 +490,29 @@ class EventManager:
         if ev.alert_stage == "all":
             return list(STUDENT_NODES)
         return []
+
+    def _explain(self, ev: HelpEvent, now: float, situation: str, extra: dict | None = None):   # [알림문구]
+        """vision_service 에 지금 상황의 알림 문구를 요청한다.
+        situation: detect | again | fall_neighbor | fall_all | fall_risen | hand_down | away_overdue"""
+        ev.explain_seq += 1
+        ev.explain_situation = situation
+        waiting = [e.event_id for e in self._sorted_open() if e.status == "waiting"]
+        value = {
+            "event_id": ev.event_id, "kind": ev.kind, "seat": ev.seat,
+            "situation": situation, "seq": ev.explain_seq,
+            "status": ev.status,                                      # active(추적 중) | waiting
+            "queue_pos": waiting.index(ev.event_id) + 1 if ev.event_id in waiting else 0,
+            "elapsed_s": round(now - ev.detected_at, 1),
+            "waiting_count": len(waiting),
+            "alert_stage": ev.alert_stage,
+            "confirmed": ev.confirmed_at is not None,
+        }
+        if extra:
+            value.update(extra)
+        self._send(VISION_NODE, "explain_request", value)
+
+    def _record_start(self, ev: HelpEvent):                            # [녹화]
+        self._send(RECORDER, "start", {"event_id": ev.event_id, "seat": ev.seat, "kind": ev.kind})
 
     def _cancel_fall_alert(self, ev: HelpEvent):
         self._send_students(self._alert_targets(ev), "fall_alert_cancel", {"target_seat": ev.seat})

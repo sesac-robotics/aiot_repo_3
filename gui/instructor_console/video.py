@@ -157,12 +157,15 @@ class ClipPlayer(QWidget):
         self.request_clip.emit(event_id)
 
     def on_clip_info(self, m: dict):
-        """m = {event_id, status: none | recording | saved | deleted, path}"""
+        """m = clip_info {event_id, status: none | recording | saved | deleted, started_at, ended_at, path}
+        (offline = Control 미접속이라 요청을 못 보냄, 화면 안에서만 씀)"""
         if m["event_id"] != self.event_id:
             return
         st = m["status"]
         if st == "none":
-            return self._show_msg("이 이벤트는 녹화가 없습니다\n(녹화 기능은 아직 Control 에 없습니다)")
+            return self._show_msg("이 이벤트는 녹화가 없습니다")
+        if st == "offline":
+            return self._show_msg("Control 서버에 연결되지 않아 녹화 정보를 받을 수 없습니다")
         if st == "deleted":
             return self._show_msg("보관 기간이 지나 녹화가 삭제되었습니다")
         if st == "recording":

@@ -82,7 +82,11 @@ INCIDENT_STATES = {"start", "end"}           # 사건 메시지의 value.state
 # vision_service <-> control
 VISION_TYPES = {"track_offset", "explain_text",          # ↑
                 "track_obs",                             # ↑ [팬틸트] track_offset 대체 {gen, frame_id, captured_at, status, cx, cy}
-                "track_target", "explain_request"}       # ↓
+                "track_target", "explain_request",       # ↓
+                "ask_request",                           # ↓ [질의] {ask_id, text, now}
+                "tool_call",                             # ↑ [질의] {ask_id, call_id, name, args}
+                "tool_result",                           # ↓ [질의] {ask_id, call_id, name, result}
+                "ask_answer"}                            # ↑ [질의] {ask_id, text, mode, tools, took_s} (console 로도 그대로 ↓)
 # control <-> camera_controller
 CAMERA_TYPES = {"pan_tilt",                              # ↓
                 "pan_tilt_state"}                        # ↑
@@ -90,11 +94,26 @@ CAMERA_TYPES = {"pan_tilt",                              # ↓
 CONSOLE_TYPES = {"event_update", "queue_state", "device_update",
                  "class_condition", "snapshot",          # ↓
                  "preset_saved",                         # ↓ [팬틸트] {seat, pan, tilt}
+                 "seat_info",                            # ↓ 좌석 한 개 {seat, label, neighbors, has_preset, student_name, registered_at}
                  "confirm", "resolve",                   # ↑
-                 "pan_tilt_jog", "preset_save"}          # ↑ [팬틸트] 프리셋 등록 화살표 {dpan, dtilt} / 등록 버튼 {seat}
+                 "dismiss",                              # ↑ 강사 "오감지" {event_id} -> close_reason false_alarm
+                 "pan_tilt_jog", "preset_save",          # ↑ [팬틸트] 프리셋 등록 화살표 {dpan, dtilt} / 등록 버튼 {seat}
+                 "clip_request",                         # ↑ [녹화] 이벤트 창 다시 보기 {event_id}
+                 "clip_info",                            # ↓ [녹화] {event_id, status: none|recording|saved|deleted, started_at, ended_at, path}
+                 "ask",                                  # ↑ [질의] 강사 자연어 질문 {ask_id, text}
+                 "ask_answer"}                           # ↓ [질의] {ask_id, text, mode, tools, took_s}
+# [리포트] 수업 종료 리포트 (console ↔ control ↔ vision)
+REPORT_TYPES = {"report_request",                        # ↑ console: [수업 종료 리포트] {report_id}
+                "report",                                # ↓ console: {report_id, status: writing|done, date, generated_at,
+                                                         #     data, summary, suggestions, mode, took_s, fallback}
+                "report_write",                          # ↓ vision: 숫자를 주고 문장 작성 요청 {report_id, data, now}
+                "report_text",                           # ↑ vision: {report_id, summary, suggestions, mode, took_s, fallback}
+                "view_request",                          # ↑ console: [수동보기] {seat: 1~4 | null(원위치)}
+                "view_state"}                            # ↓ console: [수동보기] {seat, until, by} (seat null = 끝, why)
 # control <-> student_client_N
 STUDENT_TYPES = {"fall_alert", "fall_alert_cancel",      # ↓
-                 "fall_confirm", "condition_summary"}    # ↑
+                 "fall_confirm", "condition_summary",    # ↑
+                 "seat_register"}                        # ↑ [자리 등록] {student_name, baseline, zones}
 # 공통
 COMMON_TYPES = {"heartbeat", "node_info", "rx_ack"}
 
@@ -104,14 +123,18 @@ COMMON_TYPES = {"heartbeat", "node_info", "rx_ack"}
 CONDITION_DETAIL_KEYS = ("drowsy", "yawn", "not_forward", "forward_lean", "head_tilt", "shoulder_tilt")
 
 VALID_TYPES = INCIDENT_TYPES | VISION_TYPES | CAMERA_TYPES | CONSOLE_TYPES \
-    | STUDENT_TYPES | COMMON_TYPES
+    | STUDENT_TYPES | COMMON_TYPES | REPORT_TYPES
 
 # messages 표에 기록하지 않는 종류 (너무 많음, D9 / 5.1)
 NOT_LOGGED_TYPES = {"heartbeat", "track_offset", "track_obs"}
 
 # 끊긴 동안 NodeClient 가 모아 두었다가 재접속 후 보내는 종류
 # (사건 + 사람이 누른 버튼. 상태 메시지는 곧 새 값이 오므로 버린다)
-BUFFERED_TYPES = INCIDENT_TYPES | {"confirm", "resolve", "fall_confirm", "preset_save"}
+BUFFERED_TYPES = INCIDENT_TYPES | {"confirm", "resolve", "dismiss", "fall_confirm", "preset_save",
+                                   "seat_register"}
+
+MAX_NAME_LEN = 50                            # seat_register 학생 이름 최대 글자 수
+MAX_ASK_LEN = 500                            # [질의] 강사 질문 최대 글자 수
 
 # 하트비트 (5.5)
 HEARTBEAT_INTERVAL_S = 2.0
@@ -134,14 +157,21 @@ TYPE_CODES = {
     # vision 0x2_
     "track_offset": 0x20, "explain_text": 0x21, "track_target": 0x22, "explain_request": 0x23,
     "track_obs": 0x24,
+    "ask_request": 0x25, "tool_call": 0x26, "tool_result": 0x27,          # [질의] (0x28~ 은 IF 명세 로그 검색 예약)
     # camera 0x3_
     "pan_tilt": 0x30, "pan_tilt_state": 0x31,
     # console 0x4_
     "event_update": 0x40, "queue_state": 0x41, "device_update": 0x42, "class_condition": 0x43,
     "snapshot": 0x44, "confirm": 0x45, "resolve": 0x46,
-    "pan_tilt_jog": 0x47, "preset_save": 0x48, "preset_saved": 0x49,
+    "pan_tilt_jog": 0x47, "preset_save": 0x48, "preset_saved": 0x49, "seat_info": 0x4A, "dismiss": 0x4B,
+    "clip_request": 0x4C, "clip_info": 0x4D,
+    "ask": 0x4E, "ask_answer": 0x4F,                                         # [질의]
+    # [리포트] 0x6_ (console 0x4_ 칸이 다 차서 새 칸)
+    "report_request": 0x60, "report": 0x61, "report_write": 0x62, "report_text": 0x63,
+    "view_request": 0x64, "view_state": 0x65,                               # [수동보기]
     # student 0x5_
     "fall_alert": 0x50, "fall_alert_cancel": 0x51, "fall_confirm": 0x52, "condition_summary": 0x53,
+    "seat_register": 0x54,
 }
 CODE_NODES = {v: k for k, v in NODE_CODES.items()}
 CODE_TYPES = {v: k for k, v in TYPE_CODES.items()}
@@ -414,12 +444,34 @@ def _check_value(type_: str, v: dict):
         if not cond:
             raise MessageError(f"{type_} 의 value 오류 ({what}): {v}")
 
-    if type_ in ("confirm", "resolve"):
+    if type_ in ("confirm", "resolve", "dismiss"):
         need(_is_int(v.get("event_id")), "event_id 는 정수")
     elif type_ == "explain_text":
         need(_is_int(v.get("event_id")), "event_id 는 정수")
         need(isinstance(v.get("text", ""), str), "text 는 문자열")
         need(v.get("mode") is None or isinstance(v["mode"], str), "mode 는 문자열")
+        need(v.get("seq") is None or _is_int(v["seq"]), "seq 는 정수")              # [알림문구]
+    elif type_ == "ask":                                                    # [질의]
+        need(_is_int(v.get("ask_id")), "ask_id 는 정수")
+        need(isinstance(v.get("text"), str) and 0 < len(v["text"].strip()) <= MAX_ASK_LEN,
+             f"text 는 1~{MAX_ASK_LEN}자 문자열")
+    elif type_ in ("ask_request", "ask_answer"):                            # [질의]
+        need(_is_int(v.get("ask_id")), "ask_id 는 정수")
+        need(isinstance(v.get("text"), str), "text 는 문자열")
+    elif type_ == "view_request":                                           # [수동보기]
+        need(v.get("seat") is None or (v["seat"] in VALID_SEATS and _is_int(v["seat"])), "seat 은 좌석 번호 또는 null")
+    elif type_ == "view_state":
+        pass
+    elif type_ in REPORT_TYPES:                                             # [리포트]
+        need(_is_int(v.get("report_id")), "report_id 는 정수")
+        if type_ == "report_text":
+            need(v.get("summary") is None or isinstance(v["summary"], str), "summary 는 문자열")
+            need(isinstance(v.get("suggestions", []), list), "suggestions 는 목록")
+    elif type_ in ("tool_call", "tool_result"):                             # [질의]
+        need(_is_int(v.get("ask_id")) and _is_int(v.get("call_id")), "ask_id, call_id 는 정수")
+        need(isinstance(v.get("name"), str), "name 은 문자열")
+        if type_ == "tool_call":
+            need(isinstance(v.get("args", {}), dict), "args 는 dict")
     elif type_ == "fall_confirm":
         need(v.get("target_seat") in VALID_SEATS and _is_int(v.get("target_seat")),
              "target_seat 은 좌석 번호")
@@ -434,6 +486,11 @@ def _check_value(type_: str, v: dict):
         need(_is_num(v.get("dpan")) and _is_num(v.get("dtilt")), "dpan, dtilt 는 숫자")
     elif type_ == "preset_save":
         need(v.get("seat") in VALID_SEATS and _is_int(v.get("seat")), "seat 은 좌석 번호")
+    elif type_ == "seat_register":
+        name = v.get("student_name")
+        need(isinstance(name, str) and 0 < len(name.strip()) <= MAX_NAME_LEN, f"student_name 은 1~{MAX_NAME_LEN}자")
+        need(isinstance(v.get("baseline"), dict), "baseline 은 dict")
+        need(v.get("zones") is None or isinstance(v["zones"], dict), "zones 는 dict")
     elif type_ == "condition_summary":
         # 필드 이름이 틀리면 반 집계에서 조용히 '정상'으로 세어지므로 받는 순간 버린다
         need(all(isinstance(v.get(k), bool) for k in ("focus_low", "posture_bad")),

@@ -1,7 +1,7 @@
 """강사 화면 ① 홈 · ② 이벤트 창 · ③ 학생 정보 창 (화면 구성도 v3)
 
-홈 = 왼쪽 '좌석도 자리'(좌석도 / 이벤트 창 / 학생 정보 창이 번갈아 열림)
-   + 오른쪽 이벤트 로그(메인 창구) + 통계
+홈 = 왼쪽 '좌석도 자리'(좌석도 / 이벤트 창 / 학생 정보 창 / [리포트] 수업 종료 리포트가 번갈아 열림)
+   + 오른쪽 이벤트 로그(메인 창구) + 통계 + [질의] AI 조교에게 묻기 (10/22 시안)
 """
 from __future__ import annotations
 
@@ -12,13 +12,16 @@ from typing import Callable
 from PyQt6.QtCore import QDate, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QFrame, QGridLayout,
-                             QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
+                             QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QMessageBox,
                              QPushButton, QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
                              QWidget)
 
 from common import protocol as P
 
 from . import theme as T
+from .assistant import AssistantPanel                # [질의] ⑤ AI 조교에게 묻기
+from .camera_view import CameraViewPanel             # [수동보기] "1번 좌석 보여줘"
+from .report_view import ReportPanel                 # [리포트] ⑥ 수업 종료 리포트
 from .store import SEATS, Store
 from .video import ClipPlayer, LiveVideo, UdpFrameSource
 
@@ -183,8 +186,8 @@ class EventPanel(QWidget):
         self.video_stack = QStackedWidget()
         self.live = LiveVideo(cam2, title="팬틸트 카메라 실시간")
         self.clip = ClipPlayer(clip_root)
-        # Control 에 녹화 요청 메시지가 아직 없다 → 바로 '녹화 없음'으로 답한다
-        self.clip.request_clip.connect(lambda eid: self.clip.on_clip_info({"event_id": eid, "status": "none"}))
+        # 녹화 다시 보기: Control 에 clip_request → clip_info 가 오면 main_window 가 on_clip_info 로 넘긴다
+        self.clip.request_clip.connect(self._request_clip)
         self.video_stack.addWidget(self.live)
         self.video_stack.addWidget(self.clip)
         self.video_mode = QLabel(objectName="muted")
@@ -209,14 +212,33 @@ class EventPanel(QWidget):
         btns = QHBoxLayout()
         self.b_confirm = QPushButton("확인", objectName="primary")
         self.b_resolve = QPushButton("완료")
+        self.b_dismiss = QPushButton("오감지")
         self.b_confirm.setToolTip("쓰러짐은 단계 알림을 멈추고, 질문은 '응답 중'으로 바뀝니다")
+        self.b_dismiss.setToolTip("잘못 감지된 이벤트로 닫습니다")
         self.b_confirm.clicked.connect(lambda: self.send("confirm", {"event_id": self.event_id}))
         self.b_resolve.clicked.connect(lambda: self.send("resolve", {"event_id": self.event_id}))
-        # '오감지' 버튼은 Control 에 해당 메시지(dismiss)가 생기면 다시 넣는다
+        self.b_dismiss.clicked.connect(self._dismiss)
         btns.addStretch(1)
-        for b in (self.b_confirm, self.b_resolve):
+        for b in (self.b_confirm, self.b_resolve, self.b_dismiss):
             b.setMinimumWidth(90); btns.addWidget(b)
         lay.addLayout(btns)
+
+    def _request_clip(self, event_id: int):
+        if not self.send("clip_request", {"event_id": event_id}):
+            self.clip.on_clip_info({"event_id": event_id, "status": "offline"})
+
+    def _dismiss(self):
+        """오감지는 이벤트를 닫고 단계 알림도 멈추므로 한 번 더 묻는다 (완료 버튼 옆이라 잘못 누르기 쉬움)"""
+        ev = self._data()
+        if not ev:
+            return
+        warn = "\n\n⚠ 쓰러짐입니다. 학생 상태를 직접 확인했나요?" if ev["kind"] == "fall" else ""
+        ans = QMessageBox.question(
+            self, "오감지로 닫기",
+            f"{ev['seat']}번 좌석 {T.KIND_NAME[ev['kind']]} 이벤트를 잘못 감지된 것으로 닫습니다.{warn}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if ans == QMessageBox.StandardButton.Yes:
+            self.send("dismiss", {"event_id": self.event_id})
 
     def open(self, event_id: int):
         self.event_id = event_id
@@ -267,6 +289,7 @@ class EventPanel(QWidget):
 
         self.b_confirm.setEnabled(is_open and not ev["confirmed_at"])
         self.b_resolve.setEnabled(is_open)
+        self.b_dismiss.setEnabled(is_open)
 
 
 # ── 3. 학생 정보 창 ─────────────────────────────────────────
@@ -365,8 +388,7 @@ class StudentPanel(QWidget):
         ev = self.store.seat_top_event(self.seat)
         self.fields["state"].setText(T.KIND_NAME[ev["kind"]] if ev else "일반")
         self.fields["state"].setStyleSheet(f"font-weight:600; color:{T.KIND_COLOR[ev['kind']] if ev else '#202124'};")
-        # 자리 등록 정보는 아직 Control 이 보내지 않는다
-        self.fields["reg"].setText("등록됨" if name else "—")
+        self.fields["reg"].setText(f"{T.mdhm(s['registered_at'])} 등록" if s.get("registered_at") else "—")
         nbs = s["neighbors"]
         self.fields["nb"].setText(", ".join(f"{n}번 {self.store.student_name(n) or '(미등록)'}" for n in nbs) or "—")
 
@@ -596,16 +618,22 @@ class HomePage(QWidget):
         self.seat_map = SeatMap(store)
         self.event_panel = EventPanel(store, send, logs, cam2, clip_root)
         self.student_panel = StudentPanel(store, logs)
-        for w in (self.seat_map, self.event_panel, self.student_panel):
+        self.report_panel = ReportPanel()                                  # [리포트]
+        self.view_panel = CameraViewPanel(cam2, send)                      # [수동보기]
+        for w in (self.seat_map, self.event_panel, self.student_panel, self.report_panel, self.view_panel):
             self.seat_area.addWidget(w)
+        self.reports: dict[int, dict] = {}                                 # [리포트] report_id -> 최신 report
         lay.addWidget(self.seat_area, 11)
 
         right = QVBoxLayout()
         right.setSpacing(16)
         self.log = LogPanel(store, logs)
         self.stats = StatsPanel(store, logs)
-        right.addWidget(self.log, 1)
+        self.assistant = AssistantPanel(send)                              # [질의]
+        self.assistant.setMinimumHeight(300)
+        right.addWidget(self.log, 3)
         right.addWidget(self.stats)
+        right.addWidget(self.assistant, 2)
         lay.addLayout(right, 9)
 
         self.seat_map.seat_clicked.connect(self.open_student)
@@ -613,6 +641,11 @@ class HomePage(QWidget):
         self.student_panel.open_event.connect(self.open_event)
         self.event_panel.closed.connect(self.show_map)
         self.student_panel.closed.connect(self.show_map)
+        self.report_panel.closed.connect(self.show_map)                    # [리포트]
+        self.view_panel.closed.connect(self.show_map)                      # [수동보기]
+        self.assistant.camera_home.connect(lambda: send("view_request", {"seat": None}))
+        self.assistant.open_report.connect(self.open_report)
+        self.assistant.save_report_pdf.connect(self.save_report_pdf)
 
     def show_map(self):
         self.event_panel.clip.stop()
@@ -623,6 +656,41 @@ class HomePage(QWidget):
         self.event_panel.open(event_id)
         self.log.select(event_id)
         self.seat_area.setCurrentWidget(self.event_panel)
+
+    # ── [수동보기] ──
+    def on_view_state(self, m: dict):
+        """Control 의 view_state. 시작이면 좌석도 자리에 카메라 보기, 끝이면 (보고 있던 경우) 좌석도로."""
+        self.view_panel.show_state(m)
+        self.assistant.on_view_state(m)
+        if m.get("seat"):
+            if self.seat_area.currentWidget() is not self.event_panel:      # 이벤트 창을 보는 중이면 가리지 않는다
+                self.event_panel.clip.stop()
+                self.log.select(0)
+                self.seat_area.setCurrentWidget(self.view_panel)
+        elif self.seat_area.currentWidget() is self.view_panel:
+            self.seat_area.setCurrentWidget(self.seat_map)
+
+    # ── [리포트] ──
+    def on_report(self, m: dict):
+        """Control 의 report (숫자 먼저 writing → 문장 done). 리포트 화면이 이 리포트를 보고 있으면 바로 갱신."""
+        self.reports[m["report_id"]] = m
+        self.assistant.on_report(m)
+        cur = self.report_panel.report or {}
+        if self.seat_area.currentWidget() is self.report_panel and cur.get("report_id") == m["report_id"]:
+            self.report_panel.show_report(m)
+
+    def open_report(self, report_id: int):
+        m = self.reports.get(report_id)
+        if not m:
+            return
+        self.event_panel.clip.stop()
+        self.log.select(0)
+        self.report_panel.show_report(m)
+        self.seat_area.setCurrentWidget(self.report_panel)
+
+    def save_report_pdf(self, report_id: int):
+        self.open_report(report_id)
+        self.report_panel.save_pdf()
 
     def open_student(self, seat: int):
         self.event_panel.clip.stop()
@@ -637,3 +705,5 @@ class HomePage(QWidget):
             self.event_panel.refresh()
         elif cur is self.student_panel:
             self.student_panel.refresh()
+        elif cur is self.view_panel:                                        # [수동보기] 남은 시간
+            self.view_panel.tick()

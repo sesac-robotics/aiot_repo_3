@@ -1,6 +1,7 @@
 """
 event_manager 단위 테스트 (상세 설계 9장 "단위"): 가짜 시계로 사건을 순서대로 넣는다.
-확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 팬틸트 연동(preset/home/track, gen)
+확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 팬틸트 연동(preset/home/track, gen),
+      녹화 구간(확정 ~ 종료), [수동보기] 좌석 보기, [알림문구] 상황별 explain_request·늦은 응답 거르기
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m unittest tools.test_event_manager -v
 """
@@ -17,6 +18,7 @@ from hub.event_manager import EventManager            # noqa: E402
 
 T0 = 1000.0
 PT = "pantilt"                                        # [팬틸트]
+REC = "recorder"                                      # [녹화]
 
 
 def sends(fx, type_=None, to=None):
@@ -71,6 +73,19 @@ class EventManagerTest(unittest.TestCase):
         self.start("question", 2, 1)
         self.assertEqual(self.queue(), {"active": 2, "waiting": [1]})
 
+    def test_dismiss_closes_as_false_alarm_and_cancels_alert(self):
+        self.start("fall", 2, 0)
+        self.start("question", 3, 1)
+        self.m.tick(T0 + 16)                                                 # 옆자리 알림까지 간 쓰러짐
+        fx = self.m.on_dismiss(1, T0 + 17, "instructor_console")
+        closed = [s for s in fx.saves if s["event_id"] == 1][-1]
+        self.assertEqual((closed["status"], closed["close_reason"]), ("closed", "false_alarm"))
+        self.assertIn("dismiss", [l[2] for l in fx.logs])
+        self.assertEqual(sorted(c.to for c in sends(fx, "fall_alert_cancel")),
+                         ["student_client_1", "student_client_4"])
+        self.assertEqual(self.queue(), {"active": 2, "waiting": []})         # 다음 대상으로
+        self.assertFalse(self.m.on_dismiss(1, T0 + 18, "instructor_console"))   # 이미 닫힘
+
     def test_resolve_moves_to_next(self):
         self.start("question", 2, 0)
         self.start("fall", 3, 1)
@@ -111,7 +126,7 @@ class EventManagerTest(unittest.TestCase):
         self.assertFalse(sends(self.m.tick(T0 + 14.9), "fall_alert"))
         fx = self.m.tick(T0 + 15.0)
         alerts = sends(fx, "fall_alert")
-        self.assertEqual(sorted(a.to for a in alerts), ["student_client_1", "student_client_3"])
+        self.assertEqual(sorted(a.to for a in alerts), ["student_client_1", "student_client_4"])   # 2×2
         self.assertEqual(alerts[0].value, {"target_seat": 2, "stage": "neighbor"})
         self.assertFalse(sends(self.m.tick(T0 + 20), "fall_alert"))        # 한 번만
         fx = self.m.tick(T0 + 30.0)
@@ -123,7 +138,7 @@ class EventManagerTest(unittest.TestCase):
         self.m.tick(T0 + 15)
         fx = self.m.on_confirm(1, T0 + 16, "instructor_console")
         self.assertEqual(sorted(c.to for c in sends(fx, "fall_alert_cancel")),
-                         ["student_client_1", "student_client_3"])           # 알림 받은 옆자리만
+                         ["student_client_1", "student_client_4"])           # 알림 받은 옆자리만
         self.assertEqual(self.m.events[1].confirmed_by, "instructor_console")
         self.assertEqual(self.m.events[1].status, "active")             # confirm 은 상태가 아님
         self.assertFalse(sends(self.m.tick(T0 + 40), "fall_alert"))
@@ -234,6 +249,173 @@ class EventManagerTest(unittest.TestCase):
         self.assertEqual(m2.next_id, 3)
         fx = m2.start(T0 + 2)                                                       # [팬틸트] 재시작 후 팬틸트 복구
         self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 1, "seat": 3, "kind": 1})
+
+        self.assertEqual([s.value["event_id"] for s in sends(fx, "start", REC)], [2, 1])   # [녹화] 열린 이벤트 녹화 재개
+
+    # ---- [녹화] 녹화 구간 = 확정 ~ 완료·오감지·만료·복귀 -------------------------
+    def test_record_starts_on_detect_for_every_event(self):
+        fx1 = self.start("question", 2, 0)
+        fx2 = self.start("away", 4, 1)                  # 대기열로 가도 녹화는 확정 시각부터
+        self.assertEqual(sends(fx1, "start", REC)[0].value, {"event_id": 1, "seat": 2, "kind": "question"})
+        self.assertEqual(sends(fx2, "start", REC)[0].value, {"event_id": 2, "seat": 4, "kind": "away"})
+        self.assertFalse(self.start("question", 2, 2))  # 중복 사건은 새 녹화 없음
+
+    def test_record_not_stopped_by_confirm_preempt_or_end_without_close(self):
+        self.start("question", 2, 0)
+        fxs = [self.start("fall", 3, 1),                                   # 선점
+               self.m.on_confirm(1, T0 + 2, "instructor_console"),
+               self.m.on_incident("question", 2, "end", T0 + 3),          # 손 내림 (닫지 않음)
+               self.m.on_incident("fall", 3, "end", T0 + 4)]              # 일어남 (닫지 않음)
+        self.assertEqual([s for fx in fxs for s in sends(fx, "stop", REC)], [])
+
+    def test_record_stops_on_every_close(self):
+        self.start("question", 1, 0)
+        self.start("fall", 2, 1)
+        self.start("away", 3, 2)
+        self.start("question", 4, 3)
+        cases = [(self.m.on_resolve(1, T0 + 10, "instructor_console"), 1),
+                 (self.m.on_dismiss(2, T0 + 11, "instructor_console"), 2),
+                 (self.m.on_incident("away", 3, "end", T0 + 12), 3),
+                 (self.m.tick(T0 + 3 + self.cfg["timers"]["question_expire_s"]), 4)]   # 만료
+        for fx, eid in cases:
+            self.assertEqual([s.value for s in sends(fx, "stop", REC)], [{"event_id": eid}])
+
+
+
+class ExplainSituationTest(unittest.TestCase):                           # [알림문구]
+    """상황이 바뀔 때마다 vision_service 에 explain_request {situation} 를 보내는지."""
+
+    def setUp(self):
+        self.m = EventManager(copy.deepcopy(CONTROL_DEFAULTS))
+
+    def start(self, kind, seat, t):
+        return self.m.on_incident(kind, seat, "start", T0 + t, source="vision_service:1")
+
+    def req(self, fx):
+        r = sends(fx, "explain_request")
+        self.assertEqual(len(r), 1, fx.sends)
+        return r[0].value
+
+    def test_detect_active(self):
+        v = self.req(self.start("question", 2, 0))
+        self.assertEqual((v["situation"], v["status"], v["queue_pos"], v["seq"]), ("detect", "active", 0, 1))
+        self.assertNotIn("preempted_kind", v)
+
+    def test_detect_preempts(self):
+        self.start("question", 2, 0)
+        v = self.req(self.start("fall", 3, 1))
+        self.assertEqual((v["situation"], v["status"], v["preempted_kind"], v["preempted_seat"]),
+                         ("detect", "active", "question", 2))
+        self.assertEqual(v["waiting_count"], 1)
+
+    def test_detect_waiting_has_queue_pos(self):
+        self.start("fall", 3, 0)
+        self.start("question", 2, 1)
+        v = self.req(self.start("question", 4, 2))
+        self.assertEqual((v["status"], v["queue_pos"], v["waiting_count"]), ("waiting", 2, 2))
+
+    def test_fall_neighbor_and_all(self):
+        self.start("fall", 3, 0)
+        v = self.req(self.m.tick(T0 + 15))
+        self.assertEqual((v["situation"], v["alert_stage"], v["elapsed_s"], v["seq"]), ("fall_neighbor", "neighbor", 15.0, 2))
+        v = self.req(self.m.tick(T0 + 30))
+        self.assertEqual((v["situation"], v["alert_stage"]), ("fall_all", "all"))
+
+    def test_no_fall_alert_explain_after_confirm(self):
+        self.start("fall", 3, 0)
+        self.m.on_confirm(1, T0 + 5, "instructor_console")
+        self.assertEqual(sends(self.m.tick(T0 + 31), "explain_request"), [])
+
+    def test_fall_risen_only_before_confirm(self):
+        self.start("fall", 3, 0)
+        v = self.req(self.m.on_incident("fall", 3, "end", T0 + 5))
+        self.assertEqual(v["situation"], "fall_risen")
+        self.start("fall", 3, 6)                                           # 다시 쓰러짐
+        self.m.on_confirm(1, T0 + 7, "instructor_console")
+        self.assertEqual(sends(self.m.on_incident("fall", 3, "end", T0 + 8), "explain_request"), [])
+
+    def test_hand_down_and_again(self):
+        self.start("question", 2, 0)
+        self.assertEqual(self.req(self.m.on_incident("question", 2, "end", T0 + 3))["situation"], "hand_down")
+        self.assertEqual(self.req(self.start("question", 2, 4))["situation"], "again")
+
+    def test_away_overdue_once(self):
+        self.start("away", 4, 0)
+        v = self.req(self.m.tick(T0 + 60))
+        self.assertEqual(v["situation"], "away_overdue")
+        self.assertEqual(sends(self.m.tick(T0 + 61), "explain_request"), [])
+
+    def test_stale_explain_text_ignored(self):
+        self.start("fall", 3, 0)                                           # seq 1 (detect)
+        self.m.tick(T0 + 15)                                               # seq 2 (fall_neighbor)
+        fx = self.m.on_explain_text(1, "옛 문구", "gemini", T0 + 16, seq=1)
+        self.assertFalse(fx)
+        self.assertIsNone(self.m.events[1].explain_text)
+        fx = self.m.on_explain_text(1, "새 문구", "ollama", T0 + 16, seq=2)
+        self.assertEqual(sends(fx, "event_update")[0].value["explain_text"], "새 문구")
+        self.assertEqual(sends(fx, "event_update")[0].value["explain_situation"], "fall_neighbor")
+
+    def test_explain_text_without_seq_still_accepted(self):              # 예전 vision 과도 호환
+        self.start("question", 2, 0)
+        fx = self.m.on_explain_text(1, "문구", "default", T0 + 1)
+        self.assertEqual(sends(fx, "event_update")[0].value["explain_text"], "문구")
+
+
+
+class ManualViewTest(unittest.TestCase):                                 # [수동보기]
+    """강사 "1번 좌석 보여줘": 이벤트 없을 때만, 60초 뒤 원위치, 새 이벤트가 오면 넘김."""
+
+    def setUp(self):
+        self.m = EventManager(copy.deepcopy(CONTROL_DEFAULTS))
+        self.C = "instructor_console"
+
+    def test_view_when_idle_moves_without_led(self):
+        fx, r = self.m.on_view_request(1, T0, self.C)
+        self.assertEqual((r["ok"], r["seat"], r["hold_s"]), (True, 1, 60.0))
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 1, "seat": 1, "kind": 0})       # LED 끔
+        self.assertEqual(sends(fx, "track_target")[0].value, {"seat": 1, "gen": 1})
+        self.assertEqual(sends(fx, "view_state")[0].value["seat"], 1)
+        self.assertEqual(sends(fx, "explain_request"), [])                    # 이벤트 아님
+        self.assertEqual(fx.saves, [])                                        # DB 이벤트 아님
+
+    def test_refused_while_tracking(self):
+        self.m.on_incident("question", 2, "start", T0)
+        fx, r = self.m.on_view_request(1, T0 + 1, self.C)
+        self.assertEqual((r["ok"], r["reason"], r["tracking"]["seat"]), (False, "tracking", 2))
+        self.assertFalse(fx)                                                  # 아무것도 안 움직임
+
+    def test_timeout_goes_home(self):
+        self.m.on_view_request(3, T0, self.C)
+        self.assertEqual(sends(self.m.tick(T0 + 59), "home", PT), [])
+        fx = self.m.tick(T0 + 60)
+        self.assertEqual(len(sends(fx, "home", PT)), 1)
+        self.assertEqual(sends(fx, "view_state")[0].value["why"], "timeout")
+        self.assertIsNone(self.m.view)
+
+    def test_new_event_takes_over(self):
+        self.m.on_view_request(1, T0, self.C)
+        fx = self.m.on_incident("fall", 4, "start", T0 + 5)
+        self.assertEqual(sends(fx, "preset", PT)[0].value, {"gen": 2, "seat": 4, "kind": 1})
+        self.assertEqual(sends(fx, "view_state")[0].value["why"], "event")
+        self.assertIsNone(self.m.view)
+        self.m.on_resolve(1, T0 + 10, self.C)                                 # 이벤트가 끝나도 수동 보기로 안 돌아감
+        self.assertIsNone(self.m.view)
+
+    def test_home_request_and_repeat(self):
+        self.m.on_view_request(1, T0, self.C)
+        fx, r = self.m.on_view_request(2, T0 + 10, self.C)                    # 다른 좌석으로 바꾸기
+        self.assertEqual(sends(fx, "preset", PT)[0].value["seat"], 2)
+        self.assertEqual(self.m.view["until"], T0 + 70)
+        fx, r = self.m.on_view_request(None, T0 + 20, self.C)                 # 원위치
+        self.assertTrue(r["home"])
+        self.assertEqual(len(sends(fx, "home", PT)), 1)
+        fx, r = self.m.on_view_request(None, T0 + 21, self.C)                 # 이미 원위치
+        self.assertFalse(fx)
+
+    def test_bad_seat_and_pantilt_safe(self):
+        self.assertEqual(self.m.on_view_request(9, T0, self.C)[1]["reason"], "bad_seat")
+        self.m.on_pantilt_state({"state": 7, "pan": 0, "tilt": 0, "gen": 0, "error": 1}, T0)
+        self.assertEqual(self.m.on_view_request(1, T0, self.C)[1]["reason"], "pantilt_off")
 
 
 if __name__ == "__main__":

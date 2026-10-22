@@ -17,10 +17,14 @@ control(hub) TCP 서버 (상세 설계 0·5·6장)
   접속 중인데 condition_summary 가 30초 없으면 경고하고, 1분마다 좌석별 수신 현황을 한 줄로 남긴다.
 - 카메라 영상: camera_streamer 의 UDP(6001/6002)를 저장하지 않고 instructor_console(5011/5012)로 넘긴다
   (hub/video_relay.py). --no-video 면 끈다.
+- [녹화] 이벤트 녹화: event_manager 의 to="recorder" 할 일(start/stop)을 받아 db.py 에 event_clip 행을 만들고
+  (path = "clips/{event_id}.mp4", status 1 녹화 중) ClipRecorder(hub/clip_recorder.py)가 cam2 영상을 MP4 로 쓴다.
+  끝나면 status 2 저장됨 + keep_until(= 종료 + clip_keep_days). 보관 기간이 지나면 파일을 지우고 status 3.
+  강사 화면 clip_request 에는 clip_info 로 답한다. --no-clips 면 녹화만 끈다 (--no-video 면 영상이 없어 같이 꺼짐).
 - 로그는 화면과 logs/hub.log (5MB × 5개 순환) 에 같이 남는다. 학생 수신만 보려면: grep hub.student logs/hub.log
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m hub [--host 0.0.0.0] [--port 5000] [--db 경로] [--log-file 경로] [-v]
-                                                 [--pantilt-port auto|/dev/ttyACM0] [--pantilt-sim] [--no-video]
+                                                 [--pantilt-port auto|/dev/ttyACM0] [--pantilt-sim] [--no-video] [--no-clips]
 """
 
 import argparse
@@ -33,10 +37,15 @@ from dataclasses import dataclass
 from common.config import load_config
 from common.protocol import (CONSOLE_NODE, CONTROL_NODE, DEFAULT_PORT, HEARTBEAT_TIMEOUT_S,
                              INCIDENT_TYPES, NOT_LOGGED_TYPES, FrameReader, MessageError, encode,
-                             STUDENT_NODES, make_message, parse_message, student_seat)
-from hub.control_config import DB_PATH, SERVICE_DIR, ConfigError, load_control_config
-from hub.db import Database, SchemaMismatch
-from hub.event_manager import PANTILT, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT 추가
+                             STUDENT_NODES, make_message, parse_message, student_seat,
+                             VISION_NODE)                                  # [질의]
+from hub.control_config import (DB_PATH, SERVICE_DIR, ConfigError, clip_abs_path, clip_db_path,
+                                clip_dir, load_control_config)
+from hub.ask_tools import AskTools, fmt as fmt_time                       # [질의]
+
+CAMERA_TOOLS = {"look_at_seat", "camera_home"}                           # [수동보기] 카메라를 움직이는 도구 (조회 아님)
+from hub.db import CLIP_DELETED, CLIP_RECORDING, CLIP_SAVED, SYSTEM_NODE, Database, SchemaMismatch
+from hub.event_manager import PANTILT, RECORDER, Effects, EventManager, HelpEvent   # [팬틸트] PANTILT, [녹화] RECORDER
 from hub.pantilt import PanTiltService                                    # [팬틸트]
 from hub.video_relay import VideoRelay
 
@@ -50,7 +59,9 @@ STUDENT_REPORT_INTERVAL_S = 60.0             # 좌석별 수신 현황 한 줄 �
 STUDENT_SEND_TYPES = {"fall_alert", "fall_alert_cancel"}
 
 TICK_INTERVAL_S = 0.1
-QUIET_SEND_TYPES = {"track_target", "explain_request"}   # 미접속이어도 경고 안 함 ([팬틸트] pan_tilt 는 TCP 로 안 보냄)
+CLIP_CLEANUP_INTERVAL_S = 600.0              # [녹화] 보관 기간 지난 녹화 파일 지우기 주기
+CLIP_STATUS_NAME = {CLIP_RECORDING: "recording", CLIP_SAVED: "saved", CLIP_DELETED: "deleted"}
+QUIET_SEND_TYPES = {"track_target", "explain_request", "seat_info", "clip_info"}   # 미접속이어도 경고 안 함 (seat_info 는 접속 시 snapshot 으로 다시 감) ([팬틸트] pan_tilt 는 TCP 로 안 보냄)
 
 
 @dataclass
@@ -72,24 +83,37 @@ class NodeConn:
 class HubServer:
     def __init__(self, host: str, port: int, db_path, control_cfg: dict | None = None,
                  pantilt_port: str | None = None, pantilt_sim: bool = False,   # [팬틸트] 인자 2개 추가
-                 video: bool = True):
+                 video: bool = True, clips: bool = True):
         self.host, self.port = host, port
         self.db_path = db_path
         self.db = Database(db_path)
         self.db.reset_devices(time.time())
         cfg = control_cfg or load_control_config()
         self.db.sync_seats(cfg["seats"])
+        # [녹화] 설정 + 재시작 전 녹화 중이던 클립 닫기 (파일이 끝까지 안 써졌을 수 있음)
+        self.clip_cfg = cfg.get("clips", {})
+        self.clip_dir = clip_dir(cfg)
+        n = self.db.close_recording_clips(time.time(), self.clip_keep_days())
+        if n:
+            log.warning("재시작 전 녹화 중이던 클립 %d건을 저장됨으로 닫음 (파일 끝이 깨졌을 수 있음)", n)
+        self.clips_enabled = clips and video
+        self.recorder = None                                   # [녹화] run() 에서 루프가 생긴 뒤 만든다
+        self._recording: dict[int, int] = {}                  # [녹화] event_id -> 녹화 중인 clip_id
         open_events = [HelpEvent(**row) for row in self.db.load_open_events()]
         if open_events:
             log.info("재시작 전 열린 이벤트 %d건 복구", len(open_events))
         self.events = EventManager(cfg, self.db.max_event_id() + 1, open_events)
+        self.ask_tools = AskTools(self.db, self.events)       # [질의] 읽기 전용 도구
+        self._asks: dict[int, str] = {}                       # [질의] ask_id -> 물어본 노드 (답을 돌려줄 곳)
+        self._reports: dict[int, tuple[str, dict]] = {}      # [리포트] report_id -> (물어본 노드, 숫자까지 채운 report)
         self.nodes: dict[str, NodeConn] = {}
         self.seq = 0
         # [팬틸트] 팬틸트 모듈은 run() 에서 이벤트 루프가 생긴 뒤 만든다 (on_event 를 루프로 넘기기 위해)
         self.pantilt: PanTiltService | None = None                                        # [팬틸트]
         self.pantilt_port = pantilt_port or cfg.get("pantilt", {}).get("port", "auto")   # [팬틸트] control.yaml pantilt.port
         self.pantilt_sim = pantilt_sim                                                    # [팬틸트]
-        self.video = VideoRelay(host, self.console_ip) if video else None   # 영상: streamer -> Console 중계
+        self.video = (VideoRelay(host, self.console_ip, on_frame=self.on_video_frame)   # 영상: streamer -> Console 중계
+                      if video else None)
         self.loop: asyncio.AbstractEventLoop | None = None                               # [팬틸트]
         self._last_report = time.time()
         self._report_counts: dict[str, int] = {}    # 지난 현황 요약 때의 summary_count
@@ -133,6 +157,8 @@ class HubServer:
                 self.call_pantilt(s.type, s.value)               # [팬틸트]
             elif s.to == "db":                                   # [팬틸트] 팬틸트 프리셋 저장 → seat.has_preset
                 self.record_db(s.type, s.value)                  # [팬틸트]
+            elif s.to == RECORDER:                               # [녹화] cam2 녹화 시작·종료
+                self.call_recorder(s.type, s.value, time.time())
             else:
                 await self.send(s.to, s.type, s.value, s.seat)
 
@@ -194,6 +220,104 @@ class HubServer:
                 await self.apply(self.events.on_preset_saved(fields, now))
         except Exception:
             log.exception("팬틸트 이벤트 처리 오류: %s %s", event, fields)
+
+    # ---- [녹화] 이벤트 녹화 -------------------------------------------
+    def clip_keep_days(self) -> float:
+        """보관 일수: 강사 화면 [설정](app_setting.clip_keep_days) > control.yaml clips.keep_days > 7."""
+        default = self.clip_cfg.get("keep_days", 7)
+        try:
+            return float(self.db.get_setting("clip_keep_days", default))
+        except (TypeError, ValueError):
+            log.warning("app_setting.clip_keep_days 값이 숫자가 아님 - %s일 사용", default)
+            return float(default)
+
+    def on_video_frame(self, cam: int, jpeg: bytes, rx_ts: float):
+        """video_relay 가 받은 프레임. 팬틸트 카메라(cam2)만 녹화한다 (큐에 넣기만 함)."""
+        if cam == 2 and self.recorder is not None:
+            self.recorder.feed(jpeg, rx_ts)
+
+    def new_clip_path(self, event_id: int):
+        """clips/{event_id}.mp4. 재시작 등으로 이미 있으면 clips/{event_id}_2.mp4 …"""
+        path, n = self.clip_dir / f"{event_id}.mp4", 1
+        while path.exists():
+            n += 1
+            path = self.clip_dir / f"{event_id}_{n}.mp4"
+        return path
+
+    def call_recorder(self, type_: str, v: dict, now: float):
+        """event_manager 의 to="recorder" 할 일: event_clip 기록(db.py) + ClipRecorder 호출."""
+        if self.recorder is None:
+            return
+        eid = v["event_id"]
+        if type_ == "start":
+            if eid in self._recording:
+                return
+            path = self.new_clip_path(eid)
+            rel = clip_db_path(path)
+            try:
+                clip_id = self.db.start_clip(eid, rel, now)
+                self.db.apply([], [(eid, now, "clip", SYSTEM_NODE,
+                                    {"clip_id": clip_id, "state": "start", "path": rel})])
+            except Exception:
+                log.exception("event %d 녹화 기록 실패 - 녹화하지 않음", eid)
+                return
+            self._recording[eid] = clip_id
+            self.recorder.start(eid, clip_id, path, now)
+        elif type_ == "stop":
+            if self._recording.pop(eid, None) is not None:
+                self.recorder.stop(eid, now)
+        else:
+            log.warning("모르는 녹화 명령: %s", type_)
+
+    def on_clips_done(self):
+        """녹화 스레드에서 불림 -> 루프에서 DB 를 닫는다."""
+        if self.loop is not None and not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.finish_clips)
+
+    def finish_clips(self, results=None):
+        """끝난 녹화: 저장됨(2) + keep_until, 프레임이 없으면 삭제됨(3)."""
+        for r in (self.recorder.drain() if results is None else results):
+            try:
+                if r.frames:
+                    self.db.end_clip(r.clip_id, r.ended_at, self.clip_keep_days())
+                    detail = {"clip_id": r.clip_id, "state": "saved", "frames": r.frames,
+                              "duration_s": round(r.duration_s, 1)}
+                else:
+                    self.db.discard_clip(r.clip_id, r.ended_at)
+                    detail = {"clip_id": r.clip_id, "state": "empty", "error": r.error}
+                self.db.apply([], [(r.event_id, r.ended_at, "clip", SYSTEM_NODE, detail)])
+            except Exception:
+                log.exception("녹화 종료 기록 실패: %s", r)
+
+    def cleanup_clips(self, now: float):
+        """보관 기간(keep_until)이 지난 녹화: 파일 삭제 후 status 3."""
+        for row in self.db.expired_clips(now):
+            path = clip_abs_path(row["path"])
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                log.warning("녹화 파일을 지우지 못함 (%s): %s - 다음에 다시 시도", path, e)
+                continue
+            self.db.mark_clip_deleted(row["clip_id"])
+            log.info("보관 기간 지난 녹화 삭제: event %d %s", row["event_id"], row["path"])
+
+    async def clip_cleanup_loop(self):
+        while True:
+            try:
+                self.cleanup_clips(time.time())
+            except Exception:
+                log.exception("녹화 정리 오류")
+            await asyncio.sleep(CLIP_CLEANUP_INTERVAL_S)
+
+    async def on_clip_request(self, event_id: int):
+        """강사 화면 이벤트 창 '녹화 영상 다시 보기' -> clip_info (Console 은 같은 노트북이라 path 를 직접 연다)."""
+        row = self.db.latest_clip(event_id)
+        if row is None:
+            info = {"event_id": event_id, "status": "none", "started_at": None, "ended_at": None, "path": ""}
+        else:
+            info = {"event_id": event_id, "status": CLIP_STATUS_NAME.get(row["status"], "none"),
+                    "started_at": row["started_at"], "ended_at": row["ended_at"], "path": row["path"]}
+        await self.send(CONSOLE_NODE, "clip_info", info)
 
     # ---- 연결 처리 -----------------------------------------------------
     async def handle_client(self, reader: asyncio.StreamReader,
@@ -267,7 +391,33 @@ class HubServer:
             self._report_counts[node] = 0
         await self.apply(self.events.on_node_online(node, True, now))
         if node == CONSOLE_NODE:
-            await self.send(CONSOLE_NODE, "snapshot", self.events.snapshot())
+            snap = self.events.snapshot()
+            snap["seats"] = self.seat_rows()         # 좌석도: 옆자리(control.yaml) + 지금 앉은 학생 이름 (DB)
+            await self.send(CONSOLE_NODE, "snapshot", snap)
+
+    def seat_rows(self, seat: int | None = None) -> list[dict]:
+        """강사 화면에 보내는 좌석 정보 (DB seat 표 그대로, 판단 없음). 옆자리는 control.yaml 이 기준."""
+        rows = []
+        for r in self.db.seat_info():
+            if seat is not None and r["seat"] != seat:
+                continue
+            rows.append({"seat": r["seat"], "label": r["label"] or f"{r['seat']}번 좌석",
+                         "neighbors": [int(n) for n in (r["neighbors"] or "").split(",") if n.strip()],
+                         "has_preset": bool(r["has_preset"]),
+                         "student_name": r["student_name"] or "", "registered_at": r["registered_at"]})
+        return rows
+
+    async def on_seat_register(self, conn: NodeConn, v: dict, rx_ts: float):
+        """학생 화면 [자리 등록] -> DB seat_registration -> 강사 화면에 seat_info."""
+        seat = student_seat(conn.name)
+        if seat is None:
+            log.warning("%s 는 학생 노드가 아니라 seat_register 를 버림", conn.name)
+            return
+        reg_id = self.db.register_seat(seat, v["student_name"].strip(), v["baseline"], v.get("zones"), rx_ts)
+        slog.info("수신 OK %s seat_register seat=%d reg_id=%d (zones %s)",
+                  conn.name, seat, reg_id, "있음" if v.get("zones") else "없음")
+        for row in self.seat_rows(seat):
+            await self.send(CONSOLE_NODE, "seat_info", row, seat)
 
     async def set_offline(self, conn: NodeConn, reason: str):
         conn.online = False
@@ -275,6 +425,62 @@ class HubServer:
         await self.apply(self.events.on_node_online(conn.name, False, time.time()))
 
     # ---- 메시지 처리 ---------------------------------------------------
+    async def on_ask(self, node: str, v: dict, rx_ts: float):        # [질의]
+        """강사 질문을 vision_service 로 넘긴다. vision 이 없으면 바로 답한다 (LLM 은 vision 에만 있다)."""
+        log.info("질의 #%s <- %s: %s", v["ask_id"], node, v["text"])
+        vision = self.nodes.get(VISION_NODE)
+        if vision is None or not vision.online:
+            await self.send(node, "ask_answer", {
+                "ask_id": v["ask_id"], "mode": "error", "tools": [], "took_s": 0.0,
+                "text": "AI 조교(vision_service)가 연결되어 있지 않아 답할 수 없습니다."})
+            return
+        if len(self._asks) > 100:                    # 답이 안 온 질문이 쌓이지 않게
+            self._asks.clear()
+        self._asks[v["ask_id"]] = node
+        await self.send(VISION_NODE, "ask_request", {"ask_id": v["ask_id"], "text": v["text"].strip(),
+                                                     "now": fmt_time(rx_ts)})
+
+    async def camera_tool(self, name: str, args: dict, rx_ts: float, by: str = "instructor_console") -> dict:
+        """[수동보기] look_at_seat {seat} / camera_home {}. 각도 미등록만 여기서 거르고, 나머지 판단은 event_manager."""
+        seat = None
+        if name == "look_at_seat":
+            try:
+                seat = int(args.get("seat"))
+            except (TypeError, ValueError):
+                return {"ok": False, "reason": "bad_seat", "message": "seat 는 1~4 숫자"}
+            if self.pantilt is not None and seat not in self.pantilt.presets():
+                return {"ok": False, "reason": "no_preset",
+                        "message": f"{seat}번 좌석 팬틸트 각도가 등록되지 않았습니다 (설정 › 팬틸트 각도 등록)"}
+        fx, result = self.events.on_view_request(seat, rx_ts, by)
+        await self.apply(fx)
+        log.info("수동 보기 요청 %s seat=%s by=%s -> %s", name, seat, by, result)
+        return result
+
+    async def on_report_request(self, node: str, v: dict, rx_ts: float):   # [리포트]
+        """오늘 하루 숫자를 바로 모아 Console 에 먼저 보내고(status=writing), 문장은 vision 에 맡긴다.
+        vision 이 없으면 숫자만으로 끝낸다(status=done, mode=none). 숫자는 LLM 을 거치지 않는다."""
+        try:
+            data = self.ask_tools.report_data()
+        except Exception:
+            log.exception("리포트 #%s 집계 실패", v["report_id"])
+            await self.send(node, "report", {"report_id": v["report_id"], "status": "error",
+                                             "summary": "오늘 기록을 집계하지 못했습니다 (control 로그 확인)."})
+            return
+        report = {"report_id": v["report_id"], "status": "writing", "data": data,
+                  "summary": None, "suggestions": [], "mode": None, "took_s": None, "fallback": []}
+        vision = self.nodes.get(VISION_NODE)
+        if vision is None or not vision.online:
+            report.update(status="done", mode="none", fallback=["AI 조교(vision_service)가 연결되어 있지 않아 숫자만 냄"])
+            await self.send(node, "report", report)
+            return
+        if len(self._reports) > 20:
+            self._reports.clear()
+        self._reports[v["report_id"]] = (node, dict(report))
+        log.info("리포트 #%s 요청 <- %s: 오늘 %s건", v["report_id"], node, data["total"])
+        await self.send(node, "report", report)
+        await self.send(VISION_NODE, "report_write", {"report_id": v["report_id"], "data": data,
+                                                      "now": fmt_time(rx_ts)})
+
     async def on_message(self, conn: NodeConn, msg: dict, rx_ts: float):
         if conn.last_seq >= 0 and msg["seq"] != conn.last_seq + 1:
             log.debug("%s seq 불연속: %d -> %d", conn.name, conn.last_seq, msg["seq"])
@@ -306,13 +512,47 @@ class HubServer:
         elif t == "explain_text":
             if "event_id" in v:
                 await self.apply(self.events.on_explain_text(
-                    v["event_id"], v.get("text", ""), v.get("mode"), rx_ts))
+                    v["event_id"], v.get("text", ""), v.get("mode"), rx_ts,
+                    seq=v.get("seq")))                                    # [알림문구] 늦은 응답 거르기
+        elif t == "ask":                                                # [질의] 강사 질문 -> vision 의 LLM
+            await self.on_ask(conn.name, v, rx_ts)
+        elif t == "tool_call":                                          # [질의] vision LLM 이 도구 실행 요청
+            if v["name"] in CAMERA_TOOLS:                               # [수동보기] 판단은 event_manager
+                result = await self.camera_tool(v["name"], v.get("args") or {}, rx_ts)
+            else:
+                result = self.ask_tools.run(v["name"], v.get("args") or {})
+            log.info("질의 #%s 도구 %s %s -> %s", v["ask_id"], v["name"], v.get("args"),
+                     result.get("error") or f"{len(str(result))}자")
+            await self.send(conn.name, "tool_result", {"ask_id": v["ask_id"], "call_id": v["call_id"],
+                                                       "name": v["name"], "result": result})
+        elif t == "ask_answer":                                         # [질의] vision -> 물어본 강사 화면
+            to = self._asks.pop(v["ask_id"], CONSOLE_NODE)
+            log.info("질의 #%s 답 [%s] %s", v["ask_id"], v.get("mode"), v.get("text", "")[:80])
+            await self.send(to, "ask_answer", v)
+        elif t == "view_request":                                       # [수동보기] 강사 화면 [원위치] 등
+            await self.camera_tool("camera_home" if v.get("seat") is None else "look_at_seat",
+                                   {"seat": v.get("seat")}, rx_ts, by=conn.name)
+        elif t == "report_request":                                     # [리포트] 강사 [수업 종료 리포트]
+            await self.on_report_request(conn.name, v, rx_ts)
+        elif t == "report_text":                                        # [리포트] vision 이 쓴 요약·살펴볼 점
+            pending = self._reports.pop(v["report_id"], None)
+            if pending:
+                to, report = pending
+                report.update(status="done", summary=v.get("summary"), suggestions=v.get("suggestions") or [],
+                              mode=v.get("mode"), took_s=v.get("took_s"), fallback=v.get("fallback") or [])
+                log.info("리포트 #%s 문장 [%s]", v["report_id"], v.get("mode"))
+                await self.send(to, "report", report)
         elif t == "confirm":
             if "event_id" in v:
                 await self.apply(self.events.on_confirm(v["event_id"], rx_ts, conn.name))
         elif t == "resolve":
             if "event_id" in v:
                 await self.apply(self.events.on_resolve(v["event_id"], rx_ts, conn.name))
+        elif t == "dismiss":                                            # 강사 "오감지"
+            if "event_id" in v:
+                await self.apply(self.events.on_dismiss(v["event_id"], rx_ts, conn.name))
+        elif t == "seat_register":                                      # 학생 [자리 등록]
+            await self.on_seat_register(conn, v, rx_ts)
         elif t == "fall_confirm":
             if conn.name in STUDENT_NODES:
                 slog.info("수신 OK %s fall_confirm target_seat=%s seq=%d", conn.name, v.get("target_seat"), msg["seq"])
@@ -338,6 +578,9 @@ class HubServer:
             await self.apply(self.events.on_pan_tilt_jog(int(v["dpan"]), int(v["dtilt"]), rx_ts))
         elif t == "preset_save":                                        # [팬틸트] Console 프리셋 등록 (등록 버튼)
             await self.apply(self.events.on_preset_save(int(v["seat"]), rx_ts))
+        elif t == "clip_request":                                       # [녹화] 이벤트 창 다시 보기
+            if "event_id" in v:
+                await self.on_clip_request(int(v["event_id"]))
         # [팬틸트] pan_tilt_state 분기 삭제 — 팬틸트 상태는 TCP 가 아니라 on_pantilt_event 로 온다
         else:
             log.debug("처리하지 않는 type: %s (%s)", t, conn.name)
@@ -411,13 +654,21 @@ class HubServer:
         self.loop = asyncio.get_running_loop()                                    # [팬틸트]
         self.pantilt = PanTiltService(port=self.pantilt_port, simulate=self.pantilt_sim,
                                       on_event=self.on_pantilt_event)             # [팬틸트] Uno 없어도 Control 은 계속
+        if self.clips_enabled:                                                    # [녹화] events.start() 보다 먼저
+            from hub.clip_recorder import ClipRecorder
+            self.recorder = ClipRecorder(fps=self.clip_cfg.get("fps", 10), notify=self.on_clips_done)
+            log.info("이벤트 녹화: cam2 -> %s (%sfps, 보관 %g일)", self.clip_dir,
+                     self.clip_cfg.get("fps", 10), self.clip_keep_days())
+        else:
+            log.info("이벤트 녹화 꺼짐%s", " (영상 중계가 꺼져 있음)" if not self.video else "")
         await self.apply(self.events.start(time.time()))                          # [팬틸트] 복구된 사건 좌석으로
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         log.info("control 서버 시작: %s:%d (DB: %s)", self.host, self.port, self.db_path)
         if self.video:
             await self.video.start()
         tasks = [asyncio.create_task(self.heartbeat_watchdog()),
-                 asyncio.create_task(self.tick_loop())]
+                 asyncio.create_task(self.tick_loop()),
+                 asyncio.create_task(self.clip_cleanup_loop())]                  # [녹화]
         try:
             async with server:
                 await server.serve_forever()
@@ -427,6 +678,9 @@ class HubServer:
             self.pantilt.close()                                                  # [팬틸트] 정지 + LED 끔
             if self.video:
                 self.video.close()
+            if self.recorder is not None:                                         # [녹화] 파일을 닫고 저장됨으로
+                self.finish_clips(self.recorder.close())
+                self._recording.clear()
             self.db.close()
 
 
@@ -461,7 +715,8 @@ def main():
     ap.add_argument("--pantilt-port", default=None,                                    # [팬틸트]
                     help="Uno 시리얼 포트 (기본: control.yaml pantilt.port, 없으면 auto)")
     ap.add_argument("--pantilt-sim", action="store_true", help="Uno 없이 모의 팬틸트")  # [팬틸트]
-    ap.add_argument("--no-video", action="store_true", help="카메라 영상 중계(UDP 6001/6002) 끄기")
+    ap.add_argument("--no-video", action="store_true", help="카메라 영상 중계(UDP 6001/6002) 끄기 (녹화도 꺼짐)")
+    ap.add_argument("--no-clips", action="store_true", help="이벤트 녹화(cam2 -> service/jarvis_DB/clips) 끄기")
     args = ap.parse_args()
     port = args.port or int(load_config().get("control_port", DEFAULT_PORT))
 
@@ -469,7 +724,7 @@ def main():
     try:
         server = HubServer(args.host, port, args.db,
                            pantilt_port=args.pantilt_port, pantilt_sim=args.pantilt_sim,   # [팬틸트]
-                           video=not args.no_video)
+                           video=not args.no_video, clips=not args.no_clips)
     except (SchemaMismatch, ConfigError) as e:
         log.error("%s", e)
         raise SystemExit(1)
