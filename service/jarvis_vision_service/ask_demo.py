@@ -18,6 +18,7 @@ control 에 TCP 로 두 노드를 붙인다 (alert_demo.py 와 같은 방식).
     그냥 문장       질문 (예: 오늘 쓰러짐 몇 번 있었어?)
     /seed           예시 이벤트 만들기 (질문·쓰러짐·자리 비움·오감지, 약 15초)
     /questions      준비된 질문 10개를 차례로 묻고 요약
+    /report         [수업 종료 리포트] — 오늘 숫자 + AI 요약·살펴볼 점
     /f 3, /q 2 end, /a 4, /c 1, /r 1, /d 1, /ls     사건 넣기·확인·완료·오감지·목록 (alert_demo 와 같음)
     /h  도움말      /x  끝
 """
@@ -31,6 +32,7 @@ import time
 import alert_demo
 import ask
 import llm
+import report
 import run_assistant as ra
 from alert_demo import KIND, Demo, say
 from common.config import load_config
@@ -53,17 +55,24 @@ class AskDemo(Demo):
     def __init__(self, host: str, port: int):
         super().__init__(host, port)
         self.asker = ask.AskWorker(self.vision, ra.LLM_CFG)
+        self.reporter = report.ReportWorker(self.vision, ra.LLM_CFG)         # [리포트]
+        self.reports: dict[int, dict] = {}
         self.ask_id = int(time.time()) % 100000 * 10      # 재실행해도 번호가 겹치지 않게
         self.answers: dict[int, dict] = {}
         self.answer_cv = threading.Condition()
 
     # vision_service: ask_request / tool_result 는 AskWorker 로, 나머지(explain_request)는 alert_demo 그대로
     def on_vision(self, msg: dict):
-        if not self.asker.on_message(msg):
+        if not self.asker.on_message(msg) and not self.reporter.on_message(msg):
             super().on_vision(msg)
 
     # instructor_console: ask_answer 를 받아 둔다
     def on_console(self, msg: dict):
+        if msg["type"] == "report":                                         # [리포트]
+            with self.answer_cv:
+                self.reports[msg["value"]["report_id"]] = msg["value"]
+                self.answer_cv.notify_all()
+            return
         if msg["type"] == "ask_answer":
             with self.answer_cv:
                 self.answers[msg["value"]["ask_id"]] = msg["value"]
@@ -91,6 +100,40 @@ class AskDemo(Demo):
             say(f"   🔧 {t['name']} {json.dumps(t.get('args') or {}, ensure_ascii=False)} → {t.get('summary')}")
         say(f"💬 [{v.get('mode')} {time.time() - t0:.1f}s] " + v.get("text", "").replace("\n", "\n          "))
         return {**v, "round_trip_s": time.time() - t0}
+
+    def report(self, timeout_s: float = 60.0):
+        """[리포트] [수업 종료 리포트] 버튼과 같다. 숫자가 먼저 오고(writing), 문장이 나중에 온다(done)."""
+        self.ask_id += 1
+        rid = self.ask_id
+        say()
+        say("📄 [수업 종료 리포트]")
+        t0 = time.time()
+        if not self.console.send("report_request", value={"report_id": rid}):
+            say("   보내지 못함 (control 연결 확인)")
+            return None
+        with self.answer_cv:
+            ok = self.answer_cv.wait_for(lambda: self.reports.get(rid, {}).get("status") in ("done", "error"), timeout_s)
+            r = self.reports.get(rid)
+        if not r:
+            say("   리포트가 오지 않음")
+            return None
+        d = r.get("data") or {}
+        k = d.get("by_kind") or {}
+        say(f"   숫자: {d.get('date')} 도움 요청 {d.get('total')}건 (쓰러짐 {k.get('fall')} · 질문 {k.get('question')} · "
+            f"자리비움 {k.get('away')}) · 평균 확인 {d.get('avg_confirm')} · 최대 {d.get('max_confirm')}")
+        for s_, v in (d.get("by_seat") or {}).items():
+            say(f"   {s_}번 좌석 {v['total']}건")
+        for o in d.get("device_outages") or []:
+            say(f"   장비 끊김 {o['name']} {o['from']}~{o['to']}")
+        if not ok:
+            say(f"   {timeout_s:.0f}초 안에 문장이 오지 않음")
+            return r
+        for reason in r.get("fallback") or []:
+            say(f"   ⚠ {reason}")
+        say(f"💬 [{r.get('mode')} {time.time() - t0:.1f}s] 요약: {r.get('summary')}")
+        for i, sug in enumerate(r.get("suggestions") or [], 1):
+            say(f"          살펴볼 점 {i}. {sug}")
+        return r
 
     def seed(self):
         """예시 이벤트. 실제 LLM 알림 문구도 같이 만들어진다."""
@@ -154,6 +197,8 @@ def repl(demo: AskDemo):
                 demo.seed()
             elif p[0] == "questions":
                 demo.run_questions()
+            elif p[0] == "report":
+                demo.report()
             elif p[0] == "ls":
                 demo.show()
             elif p[0] in KIND and len(p) >= 2:
@@ -173,6 +218,7 @@ def main():
     ap.add_argument("--ask", help="이 질문 하나만 묻고 끝")
     ap.add_argument("--seed", action="store_true", help="시작할 때 예시 이벤트 만들기")
     ap.add_argument("--questions", action="store_true", help="준비된 질문 10개를 묻고 요약 후 끝")
+    ap.add_argument("--report", action="store_true", help="[수업 종료 리포트] 를 한 번 만들고 끝")
     ap.add_argument("--alert-ollama", action="store_true",
                     help="--seed 의 알림 문구는 Ollama 만 (Gemini 하루 한도를 질의에 아끼기)")
     ap.add_argument("-v", "--verbose", action="store_true", help="LLM·도구 로그도 보기")
@@ -202,7 +248,9 @@ def main():
     try:
         if args.seed:
             demo.seed()
-        if args.ask:
+        if args.report:
+            demo.report()
+        elif args.ask:
             demo.ask(args.ask)
         elif args.questions:
             demo.run_questions()

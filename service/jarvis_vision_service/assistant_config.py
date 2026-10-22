@@ -47,6 +47,9 @@ DEFAULTS = {
     "ask_tool_timeout_s": 5,
     "ask_max_chars": 500,
     "ask_max_concurrent": 1,
+    # [리포트]
+    "report_timeout_s": 40,
+    "ollama_report_timeout_s": 30,
 }
 
 

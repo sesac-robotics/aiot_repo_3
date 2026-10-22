@@ -74,10 +74,26 @@ control ◀──explain_text {event_id, text, mode, seq, situation}────
 설정 (`config/assistant.yaml`): `ask_timeout_s`, `ask_max_tool_rounds`, `gemini_ask_timeout_s`, `ollama_ask_timeout_s`,
 `gemini_ask_model`(질의용 Gemini, 비우면 `gemini_model`), `ask_ollama_model`(비우면 `ollama_model`. 3b 가 도구를 잘 못 고르면 7b 로), `ask_tool_timeout_s`, `ask_max_chars`, `ask_max_concurrent`.
 
+## 수업 종료 리포트 (기능 3)
+
+강사가 [수업 종료 리포트] 를 누르면 오늘 하루(0시~지금) 리포트를 만든다.
+
+```
+강사 화면 ──report_request──▶ control: 오늘 숫자 집계 (hub/ask_tools.py report_data)
+강사 화면 ◀──report (writing, 숫자만)── control ──report_write {data}──▶ vision (report.py): 요약·살펴볼 점
+강사 화면 ◀──report (done, 숫자+문장)── control ◀──report_text──────────
+```
+
+- **숫자는 control 이 집계한 값이 그대로 화면에 나간다. LLM 은 문장(오늘 요약 2~3문장, 살펴볼 점 0~3개)만 쓴다.**
+- 좌석 번호만, 반 평균만. 순서: Gemini(JSON 응답) → Ollama(format=json) → 규칙으로 만든 문장(mode `default`).
+- 강사 화면: ⑤ 창의 [수업 종료 리포트] → 요약 카드 [리포트 열기] → 좌석도 자리에 ⑥ 리포트 (PDF 저장·인쇄).
+- 설정: `report_timeout_s`(40), `ollama_report_timeout_s`(30). 터미널 시험: `python3 ask_demo.py --report`
+
 ## 파일
 
 | 파일 | 내용 |
 | --- | --- |
+| `report.py` | **[리포트]** 요약·살펴볼 점 작성 (`write_report`), `ReportWorker`(report_write 처리) |
 | `ask.py` | **[질의]** 도구 정의(`TOOL_DECLS`), Gemini·Ollama tool calling 루프, `AskWorker`(ask_request·tool_result 처리) |
 | `ask_demo.py` | **[질의] 터미널 시험.** 강사 화면·vision 역할로 control 에 붙어 질문하고 답·근거 도구를 본다 |
 | `alert_demo.py` | **알림 문구 터미널 시험.** vision_service·강사 화면 역할로 control 에 붙어 사건을 넣고 문구를 본다 |

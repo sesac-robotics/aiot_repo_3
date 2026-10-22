@@ -84,5 +84,34 @@ QPushButton#danger  { background: #d93025; color: white; border-color: #d93025; 
 QPushButton#primary:disabled, QPushButton#danger:disabled { background: #f6f7f8; color: #b0b4b8; border-color: #e1e4e8; }
 QTableWidget { background: #fff; gridline-color: #eceff1; border: none; selection-background-color: #e8f0fe;
                selection-color: #202124; }
+#assistantCard { background: #ffffff; border: 2px solid #8e24aa; border-radius: 10px; }
+#askInner, #askViewport { background: #ffffff; }
+#askQ { background: #ede7f6; color: #2a1a3a; border-radius: 12px; padding: 7px 12px; font-size: 13px; }
+#askA { background: #fafbfc; border: 1px solid #e3e7eb; border-radius: 12px; }
+#askChip { color: #4a148c; background: #f3e5f5; border: 1px solid #ce93d8; border-radius: 10px; padding: 1px 8px; font-size: 12px; }
+#askWarn { color: #b06000; font-size: 12px; }
+#askInput { border: 1.5px solid #b39ddb; border-radius: 8px; padding: 7px 10px; font-size: 14px; }
+#reportCard { background: #fbf7fd; border: 1.5px solid #8e24aa; border-radius: 10px; }
+#reportCardTitle { color: #4a148c; font-weight: 700; font-size: 14px; }
+QPushButton#purple { background: #6a1b9a; color: white; border-color: #6a1b9a; font-weight: 600; }
+QPushButton#purple:disabled { background: #f6f7f8; color: #b0b4b8; border-color: #e1e4e8; }
+QPushButton#purpleChip { background: #f3e5f5; color: #4a148c; border: 1.5px solid #6a1b9a; border-radius: 13px;
+                         padding: 4px 12px; font-weight: 700; }
+QPushButton#chipBtn { border-radius: 13px; padding: 4px 12px; color: #37474f; }
+QPushButton#dark { background: #37474f; color: white; border-color: #37474f; font-weight: 600; }
+#reportFrame { background: #ffffff; border: 2px solid #8e24aa; border-radius: 10px; }
+#reportPage { background: #ffffff; }
+#repTitle { font-size: 20px; font-weight: 700; }
+#repHead { font-size: 14px; font-weight: 700; }
+#repText { font-size: 14px; color: #202124; }
+#repSmall { font-size: 12px; color: #4a5560; }
+#repBig { font-size: 24px; font-weight: 700; }
+#repBox { background: #ffffff; border: 1px solid #e3e7eb; border-radius: 8px; }
+#repAI { background: #f6f0fa; border: none; border-radius: 8px; }
+#repSeat { background: #ffffff; border: 1px solid #e3e7eb; border-radius: 6px; }
+#repSeatHead { font-size: 13px; font-weight: 700; }
+#repBoard { background: #eef1f4; border-radius: 4px; font-size: 11px; color: #4a5560; padding: 2px; }
+#tagAI { color: #4a148c; border: 1px solid #ab47bc; border-radius: 8px; padding: 0 7px; font-size: 11px; font-weight: 700; }
+#tagData { color: #37474f; border: 1px solid #90a4ae; border-radius: 8px; padding: 0 7px; font-size: 11px; font-weight: 700; }
 QHeaderView::section { background: #f8f9fa; border: none; border-bottom: 1px solid #e1e4e8; padding: 4px; color: #5f6368; }
 """

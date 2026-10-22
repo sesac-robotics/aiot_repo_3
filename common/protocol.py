@@ -102,6 +102,12 @@ CONSOLE_TYPES = {"event_update", "queue_state", "device_update",
                  "clip_info",                            # ↓ [녹화] {event_id, status: none|recording|saved|deleted, started_at, ended_at, path}
                  "ask",                                  # ↑ [질의] 강사 자연어 질문 {ask_id, text}
                  "ask_answer"}                           # ↓ [질의] {ask_id, text, mode, tools, took_s}
+# [리포트] 수업 종료 리포트 (console ↔ control ↔ vision)
+REPORT_TYPES = {"report_request",                        # ↑ console: [수업 종료 리포트] {report_id}
+                "report",                                # ↓ console: {report_id, status: writing|done, date, generated_at,
+                                                         #     data, summary, suggestions, mode, took_s, fallback}
+                "report_write",                          # ↓ vision: 숫자를 주고 문장 작성 요청 {report_id, data, now}
+                "report_text"}                           # ↑ vision: {report_id, summary, suggestions, mode, took_s, fallback}
 # control <-> student_client_N
 STUDENT_TYPES = {"fall_alert", "fall_alert_cancel",      # ↓
                  "fall_confirm", "condition_summary",    # ↑
@@ -115,7 +121,7 @@ COMMON_TYPES = {"heartbeat", "node_info", "rx_ack"}
 CONDITION_DETAIL_KEYS = ("drowsy", "yawn", "not_forward", "forward_lean", "head_tilt", "shoulder_tilt")
 
 VALID_TYPES = INCIDENT_TYPES | VISION_TYPES | CAMERA_TYPES | CONSOLE_TYPES \
-    | STUDENT_TYPES | COMMON_TYPES
+    | STUDENT_TYPES | COMMON_TYPES | REPORT_TYPES
 
 # messages 표에 기록하지 않는 종류 (너무 많음, D9 / 5.1)
 NOT_LOGGED_TYPES = {"heartbeat", "track_offset", "track_obs"}
@@ -158,6 +164,8 @@ TYPE_CODES = {
     "pan_tilt_jog": 0x47, "preset_save": 0x48, "preset_saved": 0x49, "seat_info": 0x4A, "dismiss": 0x4B,
     "clip_request": 0x4C, "clip_info": 0x4D,
     "ask": 0x4E, "ask_answer": 0x4F,                                         # [질의]
+    # [리포트] 0x6_ (console 0x4_ 칸이 다 차서 새 칸)
+    "report_request": 0x60, "report": 0x61, "report_write": 0x62, "report_text": 0x63,
     # student 0x5_
     "fall_alert": 0x50, "fall_alert_cancel": 0x51, "fall_confirm": 0x52, "condition_summary": 0x53,
     "seat_register": 0x54,
@@ -447,6 +455,11 @@ def _check_value(type_: str, v: dict):
     elif type_ in ("ask_request", "ask_answer"):                            # [질의]
         need(_is_int(v.get("ask_id")), "ask_id 는 정수")
         need(isinstance(v.get("text"), str), "text 는 문자열")
+    elif type_ in REPORT_TYPES:                                             # [리포트]
+        need(_is_int(v.get("report_id")), "report_id 는 정수")
+        if type_ == "report_text":
+            need(v.get("summary") is None or isinstance(v["summary"], str), "summary 는 문자열")
+            need(isinstance(v.get("suggestions", []), list), "suggestions 는 목록")
     elif type_ in ("tool_call", "tool_result"):                             # [질의]
         need(_is_int(v.get("ask_id")) and _is_int(v.get("call_id")), "ask_id, call_id 는 정수")
         need(isinstance(v.get("name"), str), "name 은 문자열")

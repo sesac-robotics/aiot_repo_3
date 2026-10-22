@@ -8,6 +8,7 @@ vision_service 노드 실행 파일. VS Code에서 이 파일을 열고 Run Code
 - explain_request 를 받으면 LLM(Gemini 기본, Ollama 백업) 설명을 explain_text 로 돌려준다.
 - [질의] ask_request 를 받으면 ask.py 가 LLM tool calling 으로 답을 만들어 ask_answer 로 돌려준다
   (도구는 tool_call 로 control 에 실행을 맡긴다).
+- [리포트] report_write 를 받으면 report.py 가 오늘 숫자를 읽고 요약·살펴볼 점을 써서 report_text 로 돌려준다.
   control 은 상황이 바뀔 때마다(새 사건, 쓰러짐 15/30초, 일어남, 손 내림, 자리비움 미복귀) 다시 요청한다.
 
 터미널에서는:  python3 run_assistant.py [--server 127.0.0.1]
@@ -29,6 +30,7 @@ from common.protocol import VISION_NODE        # noqa: E402
 
 import ask                                     # noqa: E402  [질의] 강사 자연어 질의 + tool calling
 import llm                                     # noqa: E402  AI 조교 설명 (Gemini → Ollama → 기본 문구)
+import report                                  # noqa: E402  [리포트] 수업 종료 리포트 문장
 from assistant_config import load_assistant_config   # noqa: E402
 
 LOOP_FPS = 15            # 감지 루프 목표 속도 (초당 반복 횟수)
@@ -38,6 +40,7 @@ track_seat = None        # 지금 추적할 좌석 (control 의 track_target 으
 LLM_CFG = load_assistant_config()                                     # config/assistant.yaml + .env
 explain_slots = threading.Semaphore(int(LLM_CFG.get("max_concurrent", 2)))   # 동시 설명 요청 수 제한
 asker: "ask.AskWorker | None" = None                                  # [질의] main() 에서 client 와 함께 만든다
+reporter: "report.ReportWorker | None" = None                         # [리포트]
 
 
 def on_message(client: NodeClient, msg: dict):
@@ -45,6 +48,8 @@ def on_message(client: NodeClient, msg: dict):
     global track_seat
     t, v = msg["type"], msg["value"]
     if asker is not None and asker.on_message(msg):     # [질의] ask_request / tool_result
+        return
+    if reporter is not None and reporter.on_message(msg):   # [리포트] report_write
         return
     if t == "track_target":
         track_seat = v.get("seat")
@@ -94,7 +99,9 @@ def main():
 
     client = NodeClient(VISION_NODE, cfg["control_host"], int(cfg["control_port"]),
                         on_message=lambda m: on_message(client, m))
-    global asker
+    global asker, reporter
+    reporter = report.ReportWorker(client, LLM_CFG, on_done=lambda req, res: print(
+        f"-> report_text #{req['report_id']} [{res['mode']} {res['took_s']}s] {res['summary'][:80]}"))
     asker = ask.AskWorker(client, LLM_CFG, on_answer=lambda req, res: print(
         f"-> ask_answer #{req['ask_id']} [{res['mode']} {res['took_s']}s, 도구 {len(res['tools'])}번] {res['text'][:80]}"))
     client.start()

@@ -217,6 +217,8 @@ vision_service ↔ control:
 | ↑ | `tool_call` | `{"ask_id","call_id","name","args"}` | [질의] LLM 이 고른 도구 실행 요청 |
 | ↓ | `tool_result` | `{"ask_id","call_id","name","result"}` | [질의] `hub/ask_tools.py` 실행 결과 (오류도 `{"error"}` 로) |
 | ↑ | `ask_answer` | `{"ask_id","text","mode":"gemini"\|"ollama"\|"rule"\|"default","tools":[{name,args,summary}],"took_s","fallback"}` | [질의] 최종 답 → 물어본 Console 로 그대로 |
+| ↓ | `report_write` | `{"report_id","data","now"}` | [리포트] 오늘 숫자를 주고 문장 작성 요청 |
+| ↑ | `report_text` | `{"report_id","summary","suggestions":[...],"mode","took_s","fallback"}` | [리포트] 요약 2~3문장 + 살펴볼 점 0~3개 |
 
 팬틸트: TCP 메시지가 아니다. `event_manager`의 `to="pantilt"` 할 일을 hub가 `PanTiltService` 메서드(preset·home·track·jog·save)로 부르고,
 팬틸트 알림(`pan_tilt_state`, `preset_saved`)은 이벤트 루프로 넘겨 받는다 (`hub/pantilt/README.md`).
@@ -241,6 +243,18 @@ control ↔ instructor_console:
 | ↓ | `clip_info` | `{event_id, status: "none"\|"recording"\|"saved"\|"deleted", started_at, ended_at, path}` | `clip_request` 응답. Console은 같은 노트북이라 `service/jarvis_DB/` + `path`를 직접 연다 |
 | ↑ | `ask` | `{"ask_id","text"}` (1~500자) | [질의] 강사 자연어 질문. vision 이 없으면 control 이 바로 `ask_answer mode=error` |
 | ↓ | `ask_answer` | 위 vision 표와 같음 | [질의] 답 + 근거 도구 목록 |
+| ↑ | `report_request` | `{"report_id"}` | [리포트] 강사 [수업 종료 리포트] (오늘 하루) |
+| ↓ | `report` | `{"report_id","status":"writing"\|"done"\|"error","data","summary","suggestions","mode","took_s","fallback"}` | [리포트] 숫자 먼저(writing) → 문장 붙여 한 번 더(done) |
+
+[리포트] 수업 종료 리포트 (기능 3, 10/22):
+
+- 강사가 누를 때만 만든다. 범위는 오늘 하루(0시~지금). DB 에 리포트를 저장할지는 미정 (지금은 화면·PDF 만).
+- 숫자: hub 가 `AskTools.report_data()` 로 바로 집계해 Console 에 `report status=writing` 으로 먼저 보낸다.
+  문장: vision 에 `report_write {report_id, data, now}` → `report_text {summary, suggestions, mode, took_s, fallback}` 가 오면
+  `report status=done` 으로 한 번 더 보낸다. vision 이 없으면 숫자만 `done`(mode `none`).
+- `report_data`: 종류별 건수, 평균·최대 확인 시간, 평균 처리 시간, 결과별 건수, 오감지 목록, 쓰러짐 단계 알림, 좌석별 건수(키는 문자열),
+  시간대별 반 평균(class_condition), 장비 끊김 구간(device_log). **좌석 번호만, 반 평균만** (학생 이름·개인 값 없음).
+- 메시지 코드는 새 칸 0x6_ (`report_request` 0x60, `report` 0x61, `report_write` 0x62, `report_text` 0x63). console 0x4_ 가 다 찼다.
 
 [질의] 강사 자연어 질의 (기능 2, 10/22, 1차는 조회만):
 

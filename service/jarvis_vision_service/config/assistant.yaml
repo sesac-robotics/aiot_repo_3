@@ -34,3 +34,7 @@ ask_ollama_model: ""                # 비우면 ollama_model. 도구 선택이 �
 ask_tool_timeout_s: 5               # control 의 도구 결과 대기
 ask_max_chars: 500
 ask_max_concurrent: 1               # 동시에 처리하는 질문 수
+
+# --- [리포트] 수업 종료 리포트 문장 (report.py). 숫자는 control 이 집계, LLM 은 요약·살펴볼 점만 ---
+report_timeout_s: 40                # 문장 쓰기 전체 대기. 넘으면 규칙으로 만든 문장
+ollama_report_timeout_s: 30         # Ollama 요청 1번 대기 (리포트는 길어서 질의보다 길게)

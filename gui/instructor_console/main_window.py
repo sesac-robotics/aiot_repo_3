@@ -117,9 +117,13 @@ class MainWindow(QMainWindow):
         return False
 
     def on_message(self, name: str, m: dict):
-        """Store 에 담지 않는 응답 (녹화 다시 보기)."""
+        """Store 에 담지 않는 응답 (녹화 다시 보기, [질의] 답, [리포트])."""
         if name == "clip_info":
             self.home.event_panel.clip.on_clip_info(m)
+        elif name == "ask_answer":                       # [질의] ⑤ AI 조교에게 묻기
+            self.home.assistant.on_answer(m)
+        elif name == "report":                           # [리포트] ⑥ 수업 종료 리포트
+            self.home.on_report(m)
 
     def on_connection(self, ok: bool):
         self.offline.setVisible(not ok)

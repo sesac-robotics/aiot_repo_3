@@ -319,3 +319,69 @@ class AskTools:
             "second_half_avg_focus_low": _round(sum(f[half:]) / max(1, len(f) - half), 2),
             "note": "비율은 반 전체 중 해당 학생 비율(0~1). 개인별 값은 없음",
         }
+
+    # ------------------------------------------------------------------ [리포트] 수업 종료 리포트 숫자
+    def report_data(self) -> dict:
+        """[리포트] 오늘 하루(0시 ~ 지금) 집계. 화면의 숫자는 전부 여기서 나오고, LLM 은 이걸 읽고 문장만 쓴다.
+        좌석 번호만, 반 평균만 (학생 이름·개인 값 없음). TLV 로 보내므로 dict 키는 문자열."""
+        now = self.clock()
+        start = parse_time("today", now, "since")
+        rows = [self._event_row(r) for r in self.db.conn.execute(
+            "SELECT * FROM help_event WHERE detected_at >= ? ORDER BY detected_at", (start,))]
+
+        by_kind = {k: sum(1 for e in rows if e["kind"] == k) for k in KIND}
+        conf = [e for e in rows if e["confirm_after_s"] is not None]
+        res = [e["close_after_s"] for e in rows if e["close_reason"] == "resolved" and e["close_after_s"] is not None]
+        longest = max(conf, key=lambda e: e["confirm_after_s"]) if conf else None
+        reasons = {}
+        for e in rows:
+            key = e["close_reason"] or ("open" if e["status"] != "closed" else "closed")
+            reasons[key] = reasons.get(key, 0) + 1
+
+        by_seat = {}
+        for s in (1, 2, 3, 4):
+            ev = [e for e in rows if e["seat"] == s]
+            by_seat[str(s)] = {"total": len(ev), **{k: sum(1 for e in ev if e["kind"] == k) for k in KIND},
+                               "false_alarm": sum(1 for e in ev if e["close_reason"] == "false_alarm")}
+
+        hourly = []                                          # 시간대별 반 평균 (값이 있는 시간만)
+        for r in self.db.conn.execute(
+                "SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS h,"
+                " avg(focus_low_ratio) AS f, avg(posture_bad_ratio) AS p, count(*) AS n"
+                " FROM class_condition WHERE ts >= ? AND ts <= ? GROUP BY h ORDER BY h", (start, now)):
+            hourly.append({"hour": r["h"], "focus_low": _round(r["f"], 2), "posture_bad": _round(r["p"], 2),
+                           "samples": r["n"]})
+
+        names = {d["node"]: d["name"] for d in self.db.devices()}
+        outages, down = [], {}                               # 오늘 끊긴 구간 (device_log)
+        for r in self.db.conn.execute("SELECT node, ts, online, note FROM device_log WHERE ts >= ? ORDER BY ts",
+                                      (start,)):
+            if not r["online"] and r["node"] not in down:
+                down[r["node"]] = (r["ts"], r["note"])
+            elif r["online"] and r["node"] in down:
+                t0, note = down.pop(r["node"])
+                outages.append({"name": names.get(r["node"], str(r["node"])), "from": fmt(t0)[11:16],
+                                "to": fmt(r["ts"])[11:16], "duration": dur(r["ts"] - t0), "note": note})
+        for node, (t0, note) in down.items():
+            outages.append({"name": names.get(node, str(node)), "from": fmt(t0)[11:16], "to": "지금까지",
+                            "duration": dur(now - t0), "note": note})
+
+        avg_conf = sum(e["confirm_after_s"] for e in conf) / len(conf) if conf else None
+        return {
+            "date": fmt(now)[:10], "generated_at": fmt(now)[11:16], "since": fmt(start), "until": fmt(now),
+            "total": len(rows), "by_kind": by_kind,
+            "avg_confirm": dur(avg_conf), "avg_confirm_s": _round(avg_conf),
+            "max_confirm": dur(longest["confirm_after_s"]) if longest else None,
+            "max_confirm_s": longest["confirm_after_s"] if longest else None,
+            "max_confirm_case": ({"seat": longest["seat"], "kind": longest["kind"],
+                                  "at": longest["detected_at"][11:16]} if longest else None),
+            "avg_resolve": dur(sum(res) / len(res)) if res else None,
+            "by_result": reasons,
+            "false_alarms": [{"seat": e["seat"], "kind": e["kind"], "at": e["detected_at"][11:16]}
+                             for e in rows if e["close_reason"] == "false_alarm"],
+            "fall_alerts": [{"seat": e["seat"], "stage": e["alert_stage"], "at": e["detected_at"][11:16]}
+                            for e in rows if e["kind"] == "fall" and e["alert_stage"] != "none"],
+            "unconfirmed_open": sum(1 for e in rows if e["status"] != "closed" and not e["confirmed_at"]),
+            "by_seat": by_seat, "hourly_condition": hourly, "device_outages": outages,
+            "note": "좌석 번호만, 반 평균만. 학생 이름·개인 집중·자세 값 없음",
+        }

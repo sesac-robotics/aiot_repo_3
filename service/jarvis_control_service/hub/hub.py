@@ -103,6 +103,7 @@ class HubServer:
         self.events = EventManager(cfg, self.db.max_event_id() + 1, open_events)
         self.ask_tools = AskTools(self.db, self.events)       # [질의] 읽기 전용 도구
         self._asks: dict[int, str] = {}                       # [질의] ask_id -> 물어본 노드 (답을 돌려줄 곳)
+        self._reports: dict[int, tuple[str, dict]] = {}      # [리포트] report_id -> (물어본 노드, 숫자까지 채운 report)
         self.nodes: dict[str, NodeConn] = {}
         self.seq = 0
         # [팬틸트] 팬틸트 모듈은 run() 에서 이벤트 루프가 생긴 뒤 만든다 (on_event 를 루프로 넘기기 위해)
@@ -437,6 +438,31 @@ class HubServer:
         await self.send(VISION_NODE, "ask_request", {"ask_id": v["ask_id"], "text": v["text"].strip(),
                                                      "now": fmt_time(rx_ts)})
 
+    async def on_report_request(self, node: str, v: dict, rx_ts: float):   # [리포트]
+        """오늘 하루 숫자를 바로 모아 Console 에 먼저 보내고(status=writing), 문장은 vision 에 맡긴다.
+        vision 이 없으면 숫자만으로 끝낸다(status=done, mode=none). 숫자는 LLM 을 거치지 않는다."""
+        try:
+            data = self.ask_tools.report_data()
+        except Exception:
+            log.exception("리포트 #%s 집계 실패", v["report_id"])
+            await self.send(node, "report", {"report_id": v["report_id"], "status": "error",
+                                             "summary": "오늘 기록을 집계하지 못했습니다 (control 로그 확인)."})
+            return
+        report = {"report_id": v["report_id"], "status": "writing", "data": data,
+                  "summary": None, "suggestions": [], "mode": None, "took_s": None, "fallback": []}
+        vision = self.nodes.get(VISION_NODE)
+        if vision is None or not vision.online:
+            report.update(status="done", mode="none", fallback=["AI 조교(vision_service)가 연결되어 있지 않아 숫자만 냄"])
+            await self.send(node, "report", report)
+            return
+        if len(self._reports) > 20:
+            self._reports.clear()
+        self._reports[v["report_id"]] = (node, dict(report))
+        log.info("리포트 #%s 요청 <- %s: 오늘 %s건", v["report_id"], node, data["total"])
+        await self.send(node, "report", report)
+        await self.send(VISION_NODE, "report_write", {"report_id": v["report_id"], "data": data,
+                                                      "now": fmt_time(rx_ts)})
+
     async def on_message(self, conn: NodeConn, msg: dict, rx_ts: float):
         if conn.last_seq >= 0 and msg["seq"] != conn.last_seq + 1:
             log.debug("%s seq 불연속: %d -> %d", conn.name, conn.last_seq, msg["seq"])
@@ -482,6 +508,16 @@ class HubServer:
             to = self._asks.pop(v["ask_id"], CONSOLE_NODE)
             log.info("질의 #%s 답 [%s] %s", v["ask_id"], v.get("mode"), v.get("text", "")[:80])
             await self.send(to, "ask_answer", v)
+        elif t == "report_request":                                     # [리포트] 강사 [수업 종료 리포트]
+            await self.on_report_request(conn.name, v, rx_ts)
+        elif t == "report_text":                                        # [리포트] vision 이 쓴 요약·살펴볼 점
+            pending = self._reports.pop(v["report_id"], None)
+            if pending:
+                to, report = pending
+                report.update(status="done", summary=v.get("summary"), suggestions=v.get("suggestions") or [],
+                              mode=v.get("mode"), took_s=v.get("took_s"), fallback=v.get("fallback") or [])
+                log.info("리포트 #%s 문장 [%s]", v["report_id"], v.get("mode"))
+                await self.send(to, "report", report)
         elif t == "confirm":
             if "event_id" in v:
                 await self.apply(self.events.on_confirm(v["event_id"], rx_ts, conn.name))

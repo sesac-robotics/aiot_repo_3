@@ -138,5 +138,24 @@ class AskToolsTest(unittest.TestCase):
         self.assertEqual(r["latest"]["reporting"], 4)
 
 
+    # ---- [리포트] ----
+    def test_report_data_today_only_seat_numbers(self):
+        self.db.insert_class_condition(TODAY_10 + 60, 0.25, 0.5, 4)
+        self.db.reset_devices(TODAY_10)
+        self.db.set_device_online("student_client_1", False, TODAY_10 + 300, "1번 좌석 알림 못 받음")
+        self.db.set_device_online("student_client_1", True, TODAY_10 + 480)
+        r = self.tools.report_data()
+        self.assertNotIn(NAME, json.dumps(r, ensure_ascii=False))           # 이름 없음
+        self.assertEqual(r["total"], 3)                                      # 어제 쓰러짐은 빠짐
+        self.assertEqual(r["by_kind"], {"fall": 1, "question": 2, "away": 0})
+        self.assertEqual((r["avg_confirm"], r["max_confirm"]), ("12초", "12초"))
+        self.assertEqual(r["by_result"], {"resolved": 1, "open": 1, "false_alarm": 1})
+        self.assertEqual(r["false_alarms"], [{"seat": 4, "kind": "question", "at": "10:03"}])
+        self.assertEqual(r["by_seat"]["3"]["fall"], 1)
+        self.assertEqual(r["hourly_condition"][0]["hour"], 10)
+        self.assertEqual(r["device_outages"][0]["duration"], "3분 0초")
+        self.assertTrue(all(isinstance(k, str) for k in r["by_seat"]))      # TLV 로 보낼 수 있게 문자열 키
+
+
 if __name__ == "__main__":
     unittest.main()

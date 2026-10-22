@@ -1,7 +1,7 @@
 """강사 화면 ① 홈 · ② 이벤트 창 · ③ 학생 정보 창 (화면 구성도 v3)
 
-홈 = 왼쪽 '좌석도 자리'(좌석도 / 이벤트 창 / 학생 정보 창이 번갈아 열림)
-   + 오른쪽 이벤트 로그(메인 창구) + 통계
+홈 = 왼쪽 '좌석도 자리'(좌석도 / 이벤트 창 / 학생 정보 창 / [리포트] 수업 종료 리포트가 번갈아 열림)
+   + 오른쪽 이벤트 로그(메인 창구) + 통계 + [질의] AI 조교에게 묻기 (10/22 시안)
 """
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDateEdit,
 from common import protocol as P
 
 from . import theme as T
+from .assistant import AssistantPanel                # [질의] ⑤ AI 조교에게 묻기
+from .report_view import ReportPanel                 # [리포트] ⑥ 수업 종료 리포트
 from .store import SEATS, Store
 from .video import ClipPlayer, LiveVideo, UdpFrameSource
 
@@ -615,16 +617,21 @@ class HomePage(QWidget):
         self.seat_map = SeatMap(store)
         self.event_panel = EventPanel(store, send, logs, cam2, clip_root)
         self.student_panel = StudentPanel(store, logs)
-        for w in (self.seat_map, self.event_panel, self.student_panel):
+        self.report_panel = ReportPanel()                                  # [리포트]
+        for w in (self.seat_map, self.event_panel, self.student_panel, self.report_panel):
             self.seat_area.addWidget(w)
+        self.reports: dict[int, dict] = {}                                 # [리포트] report_id -> 최신 report
         lay.addWidget(self.seat_area, 11)
 
         right = QVBoxLayout()
         right.setSpacing(16)
         self.log = LogPanel(store, logs)
         self.stats = StatsPanel(store, logs)
-        right.addWidget(self.log, 1)
+        self.assistant = AssistantPanel(send)                              # [질의]
+        self.assistant.setMinimumHeight(300)
+        right.addWidget(self.log, 3)
         right.addWidget(self.stats)
+        right.addWidget(self.assistant, 2)
         lay.addLayout(right, 9)
 
         self.seat_map.seat_clicked.connect(self.open_student)
@@ -632,6 +639,9 @@ class HomePage(QWidget):
         self.student_panel.open_event.connect(self.open_event)
         self.event_panel.closed.connect(self.show_map)
         self.student_panel.closed.connect(self.show_map)
+        self.report_panel.closed.connect(self.show_map)                    # [리포트]
+        self.assistant.open_report.connect(self.open_report)
+        self.assistant.save_report_pdf.connect(self.save_report_pdf)
 
     def show_map(self):
         self.event_panel.clip.stop()
@@ -642,6 +652,28 @@ class HomePage(QWidget):
         self.event_panel.open(event_id)
         self.log.select(event_id)
         self.seat_area.setCurrentWidget(self.event_panel)
+
+    # ── [리포트] ──
+    def on_report(self, m: dict):
+        """Control 의 report (숫자 먼저 writing → 문장 done). 리포트 화면이 이 리포트를 보고 있으면 바로 갱신."""
+        self.reports[m["report_id"]] = m
+        self.assistant.on_report(m)
+        cur = self.report_panel.report or {}
+        if self.seat_area.currentWidget() is self.report_panel and cur.get("report_id") == m["report_id"]:
+            self.report_panel.show_report(m)
+
+    def open_report(self, report_id: int):
+        m = self.reports.get(report_id)
+        if not m:
+            return
+        self.event_panel.clip.stop()
+        self.log.select(0)
+        self.report_panel.show_report(m)
+        self.seat_area.setCurrentWidget(self.report_panel)
+
+    def save_report_pdf(self, report_id: int):
+        self.open_report(report_id)
+        self.report_panel.save_pdf()
 
     def open_student(self, seat: int):
         self.event_panel.clip.stop()
