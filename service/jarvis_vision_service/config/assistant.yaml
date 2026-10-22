@@ -5,8 +5,9 @@
 
 # --- 1차: Gemini (클라우드) ---
 gemini_enabled: true
-gemini_model: gemini-3.1-flash-lite # 10/21 16:57 측정 1.5초. (3.5-flash-lite·3.8-flash 응답 없음, 3.5-flash 5.1초)
-gemini_timeout_s: 5                 # SD-08: 5초 넘으면 Ollama 로
+gemini_model: gemini-3.5-flash     # 10/22 측정 5/5 성공, 평균 4.2초·최대 4.9초 (3.1-flash-lite 는 평균 9.6초)
+gemini_timeout_s: 6                 # SD-08 은 5초. 3.5-flash 최대 4.9초라 1초 여유 (팀 공유 필요)
+gemini_max_tokens: 1024             # 출력 길이 제한. 생각하는 모델(3.5-flash 등)은 작으면 답이 잘림 (10/22 200 → 잘림)
 gemini_cooldown_s: 60               # 실패하면 이 시간 동안 Gemini 를 건너뛰고 바로 Ollama (10/21: 응답이 들쭉날쭉)
 gemini_thinking_level: ""          # 비움: 10/21 3.1-flash-lite 에 thinkingConfig 를 넣으면 응답이 멈춤. "low" 등은 되는 모델에서만
 

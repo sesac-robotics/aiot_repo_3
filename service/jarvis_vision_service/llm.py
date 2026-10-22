@@ -101,6 +101,7 @@ def default_text(req: dict) -> str:
 
 _HANZI = re.compile(r"[一-鿿]")          # 중국어 한자 (qwen 이 가끔 섞음)
 _QUOTES = "\"'“”‘’「」『』`"
+_SENTENCE_END = re.compile(r"(다|요|니다|세요)[.!]?$|[.!?]$")   # 완성된 문장 끝 (잘린 답 거르기)
 
 
 def clean_text(text: str, max_chars: int = 120) -> str:
@@ -115,6 +116,8 @@ def clean_text(text: str, max_chars: int = 120) -> str:
         raise LLMError(f"한자가 섞인 답: {text[:40]}")
     if not re.search(r"[가-힣]", text):
         raise LLMError(f"한국어가 아닌 답: {text[:40]}")
+    if len(text) < 10 or not _SENTENCE_END.search(text):
+        raise LLMError(f"끝나지 않은 문장: {text[:40]}")
     if len(text) > max_chars:
         text = text[:max_chars - 1].rstrip() + "…"
     return text
@@ -149,7 +152,8 @@ def ask_gemini(req: dict, cfg: dict) -> str:
     key = cfg.get("gemini_api_key")
     if not key:
         raise LLMError("GEMINI_API_KEY 없음")
-    gen_cfg = {"temperature": float(cfg.get("temperature", 0.3)), "maxOutputTokens": 200}
+    gen_cfg = {"temperature": float(cfg.get("temperature", 0.3)),
+               "maxOutputTokens": int(cfg.get("gemini_max_tokens", 1024))}   # 생각하는 모델은 생각도 여기서 씀
     if cfg.get("gemini_thinking_level"):
         gen_cfg["thinkingConfig"] = {"thinkingLevel": cfg["gemini_thinking_level"]}
     body = {
@@ -161,10 +165,14 @@ def ask_gemini(req: dict, cfg: dict) -> str:
     data = _post_json(url, body, float(cfg.get("gemini_timeout_s", 5)),
                       headers={"x-goog-api-key": key})          # 키는 URL 이 아니라 헤더로 (로그에 안 남게)
     try:
-        parts = data["candidates"][0]["content"]["parts"]
+        cand = data["candidates"][0]
+        parts = cand["content"]["parts"]
     except (KeyError, IndexError, TypeError):
         reason = (data.get("promptFeedback") or {}).get("blockReason") or str(data)[:120]
         raise LLMError(f"답 없음: {reason}") from None
+    finish = cand.get("finishReason", "STOP")
+    if finish != "STOP":                       # MAX_TOKENS(길이 제한에 잘림), SAFETY 등 → 쓰지 않는다
+        raise LLMError(f"답이 끝까지 안 옴 (finishReason={finish})")
     text = "".join(p.get("text", "") for p in parts if not p.get("thought"))   # 생각(thought) 부분은 뺀다
     return clean_text(text, int(cfg.get("max_chars", 120)))
 

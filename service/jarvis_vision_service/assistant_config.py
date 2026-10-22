@@ -23,8 +23,9 @@ ENV_FILE = HERE / ".env"
 
 DEFAULTS = {
     "gemini_enabled": True,
-    "gemini_model": "gemini-3.1-flash-lite",
-    "gemini_timeout_s": 5,
+    "gemini_model": "gemini-3.5-flash",
+    "gemini_timeout_s": 6,
+    "gemini_max_tokens": 1024,
     "gemini_cooldown_s": 60,
     "gemini_thinking_level": "",
     "ollama_enabled": True,
