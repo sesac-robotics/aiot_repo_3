@@ -449,7 +449,8 @@ class HubServer:
         elif t == "explain_text":
             if "event_id" in v:
                 await self.apply(self.events.on_explain_text(
-                    v["event_id"], v.get("text", ""), v.get("mode"), rx_ts))
+                    v["event_id"], v.get("text", ""), v.get("mode"), rx_ts,
+                    seq=v.get("seq")))                                    # [알림문구] 늦은 응답 거르기
         elif t == "confirm":
             if "event_id" in v:
                 await self.apply(self.events.on_confirm(v["event_id"], rx_ts, conn.name))

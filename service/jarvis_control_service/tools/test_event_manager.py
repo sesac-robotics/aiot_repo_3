@@ -1,7 +1,7 @@
 """
 event_manager 단위 테스트 (상세 설계 9장 "단위"): 가짜 시계로 사건을 순서대로 넣는다.
 확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 팬틸트 연동(preset/home/track, gen),
-      녹화 구간(확정 ~ 종료)
+      녹화 구간(확정 ~ 종료), [알림문구] 상황별 explain_request·늦은 응답 거르기
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m unittest tools.test_event_manager -v
 """
@@ -279,6 +279,86 @@ class EventManagerTest(unittest.TestCase):
                  (self.m.tick(T0 + 3 + self.cfg["timers"]["question_expire_s"]), 4)]   # 만료
         for fx, eid in cases:
             self.assertEqual([s.value for s in sends(fx, "stop", REC)], [{"event_id": eid}])
+
+
+
+class ExplainSituationTest(unittest.TestCase):                           # [알림문구]
+    """상황이 바뀔 때마다 vision_service 에 explain_request {situation} 를 보내는지."""
+
+    def setUp(self):
+        self.m = EventManager(copy.deepcopy(CONTROL_DEFAULTS))
+
+    def start(self, kind, seat, t):
+        return self.m.on_incident(kind, seat, "start", T0 + t, source="vision_service:1")
+
+    def req(self, fx):
+        r = sends(fx, "explain_request")
+        self.assertEqual(len(r), 1, fx.sends)
+        return r[0].value
+
+    def test_detect_active(self):
+        v = self.req(self.start("question", 2, 0))
+        self.assertEqual((v["situation"], v["status"], v["queue_pos"], v["seq"]), ("detect", "active", 0, 1))
+        self.assertNotIn("preempted_kind", v)
+
+    def test_detect_preempts(self):
+        self.start("question", 2, 0)
+        v = self.req(self.start("fall", 3, 1))
+        self.assertEqual((v["situation"], v["status"], v["preempted_kind"], v["preempted_seat"]),
+                         ("detect", "active", "question", 2))
+        self.assertEqual(v["waiting_count"], 1)
+
+    def test_detect_waiting_has_queue_pos(self):
+        self.start("fall", 3, 0)
+        self.start("question", 2, 1)
+        v = self.req(self.start("question", 4, 2))
+        self.assertEqual((v["status"], v["queue_pos"], v["waiting_count"]), ("waiting", 2, 2))
+
+    def test_fall_neighbor_and_all(self):
+        self.start("fall", 3, 0)
+        v = self.req(self.m.tick(T0 + 15))
+        self.assertEqual((v["situation"], v["alert_stage"], v["elapsed_s"], v["seq"]), ("fall_neighbor", "neighbor", 15.0, 2))
+        v = self.req(self.m.tick(T0 + 30))
+        self.assertEqual((v["situation"], v["alert_stage"]), ("fall_all", "all"))
+
+    def test_no_fall_alert_explain_after_confirm(self):
+        self.start("fall", 3, 0)
+        self.m.on_confirm(1, T0 + 5, "instructor_console")
+        self.assertEqual(sends(self.m.tick(T0 + 31), "explain_request"), [])
+
+    def test_fall_risen_only_before_confirm(self):
+        self.start("fall", 3, 0)
+        v = self.req(self.m.on_incident("fall", 3, "end", T0 + 5))
+        self.assertEqual(v["situation"], "fall_risen")
+        self.start("fall", 3, 6)                                           # 다시 쓰러짐
+        self.m.on_confirm(1, T0 + 7, "instructor_console")
+        self.assertEqual(sends(self.m.on_incident("fall", 3, "end", T0 + 8), "explain_request"), [])
+
+    def test_hand_down_and_again(self):
+        self.start("question", 2, 0)
+        self.assertEqual(self.req(self.m.on_incident("question", 2, "end", T0 + 3))["situation"], "hand_down")
+        self.assertEqual(self.req(self.start("question", 2, 4))["situation"], "again")
+
+    def test_away_overdue_once(self):
+        self.start("away", 4, 0)
+        v = self.req(self.m.tick(T0 + 60))
+        self.assertEqual(v["situation"], "away_overdue")
+        self.assertEqual(sends(self.m.tick(T0 + 61), "explain_request"), [])
+
+    def test_stale_explain_text_ignored(self):
+        self.start("fall", 3, 0)                                           # seq 1 (detect)
+        self.m.tick(T0 + 15)                                               # seq 2 (fall_neighbor)
+        fx = self.m.on_explain_text(1, "옛 문구", "gemini", T0 + 16, seq=1)
+        self.assertFalse(fx)
+        self.assertIsNone(self.m.events[1].explain_text)
+        fx = self.m.on_explain_text(1, "새 문구", "ollama", T0 + 16, seq=2)
+        self.assertEqual(sends(fx, "event_update")[0].value["explain_text"], "새 문구")
+        self.assertEqual(sends(fx, "event_update")[0].value["explain_situation"], "fall_neighbor")
+
+    def test_explain_text_without_seq_still_accepted(self):              # 예전 vision 과도 호환
+        self.start("question", 2, 0)
+        fx = self.m.on_explain_text(1, "문구", "default", T0 + 1)
+        self.assertEqual(sends(fx, "event_update")[0].value["explain_text"], "문구")
 
 
 if __name__ == "__main__":

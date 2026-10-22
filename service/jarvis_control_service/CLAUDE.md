@@ -208,10 +208,10 @@ vision_service ↔ control:
 | --- | --- | --- | --- |
 | ↑ | `fall`/`question`/`away` | `{"state":"start"\|"end"}` | 판정 확정/해제 순간 한 번 (유지 시간은 Vision이 지킴) |
 | ↑ | `track_offset` | `{"found":true,"dx":0.12,"dy":-0.05}` | 추적 중 10~15회/초. `messages`에 기록 안 함 |
-| ↑ | `explain_text` | `{"event_id","text","mode":"gemini"\|"ollama"\|"default"}` | 설명 요청 응답 |
+| ↑ | `explain_text` | `{"event_id","text","mode":"gemini"\|"ollama"\|"default","seq","situation"}` | 설명 요청 응답. `seq`가 마지막 요청과 다르면 버림 (없으면 받음) |
 | ↑ | `heartbeat` | `{"fps","cpu","cam1_fps","cam2_fps"}` | 2초마다 |
 | ↓ | `track_target` | `{"seat":2}` 또는 `{"seat":null}` | 추적 대상 변경 시 |
-| ↓ | `explain_request` | `{"event_id","kind","seat","elapsed_s","waiting_count"}` | 새 이벤트 발생 시 (비동기) |
+| ↓ | `explain_request` | `{"event_id","kind","seat","situation","seq","status","queue_pos","elapsed_s","waiting_count","alert_stage","confirmed"}` (+선점 시 `preempted_kind`,`preempted_seat`) | [알림문구] 상황이 바뀔 때마다 (아래 표, 비동기) |
 
 팬틸트: TCP 메시지가 아니다. `event_manager`의 `to="pantilt"` 할 일을 hub가 `PanTiltService` 메서드(preset·home·track·jog·save)로 부르고,
 팬틸트 알림(`pan_tilt_state`, `preset_saved`)은 이벤트 루프로 넘겨 받는다 (`hub/pantilt/README.md`).
@@ -259,7 +259,7 @@ control ↔ student_client_N:
 
 | 입력 | 처리 |
 | --- | --- |
-| 사건 `start` | 같은 좌석·같은 종류의 열린 이벤트가 있으면 무시. 없으면 help_event 생성 → 대기열 → `reschedule()` → `explain_request` |
+| 사건 `start` | 같은 좌석·같은 종류의 열린 이벤트가 있으면 무시(손 내림·일어남 뒤 다시 start 면 `explain_request again`). 없으면 help_event 생성 → 대기열 → `reschedule()` → `explain_request detect` |
 | `question` `end` | 닫지 않는다. `hand_down` 표시만 (자동 제거 여부는 논의 중) |
 | `away` `end` | `closed`, `close_reason=cleared`, 복귀 시각 기록 |
 | `fall` `end` | 자동으로 닫지 않는다. 강사 화면에 "일어남"만 표시 |
@@ -284,6 +284,21 @@ tick (0.1초마다, Control 시계):
 2. 질문 만료: `question_expire_s` 초과 → `closed`(expired)
 3. 자리비움 미복귀: `away_alert_s` 초과 → 강사에게 재알림
 4. `reschedule()`: 대기열 맨 앞이 지금 active와 다르면 교체(선점 포함) → `track_target` + `pan_tilt preset`. 비면 `home`
+
+[알림문구] `explain_request.situation` (강사용 알림 문구를 다시 만드는 순간, `_explain()`):
+
+| situation | 언제 | 비고 |
+| --- | --- | --- |
+| `detect` | 새 이벤트 생성 | 선점했으면 `preempted_kind/seat`, 대기면 `queue_pos` |
+| `again` | 손 내림·일어남 뒤 다시 start | |
+| `fall_neighbor` / `fall_all` | 쓰러짐 미확인 15초 / 30초 (`fall_alert` 보낼 때) | |
+| `fall_risen` | `fall` `end` (확인 전일 때만) | |
+| `hand_down` | `question` `end` | |
+| `away_overdue` | 자리비움 `away_alert_s` 초과 | |
+
+- 요청마다 이벤트의 `explain_seq`가 1씩 오르고, `explain_text`의 `seq`가 그것과 다르면(더 새 요청이 나간 뒤 늦게 온 응답) 버린다.
+- `explain_seq`, `explain_situation`은 화면 표시용이라 `event_update`에만 싣고 DB에는 없다. DB `help_event.explain_text`는 마지막 문구로 덮어쓴다.
+- 문구 생성은 vision_service(`llm.py`)가 한다. 터미널 시험: `service/jarvis_vision_service/alert_demo.py`.
 
 설정 (`config/control.yaml`, 좌석 각도는 예시값 — 박병준님 측정값으로 교체):
 

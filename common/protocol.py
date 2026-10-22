@@ -430,6 +430,7 @@ def _check_value(type_: str, v: dict):
         need(_is_int(v.get("event_id")), "event_id 는 정수")
         need(isinstance(v.get("text", ""), str), "text 는 문자열")
         need(v.get("mode") is None or isinstance(v["mode"], str), "mode 는 문자열")
+        need(v.get("seq") is None or _is_int(v["seq"]), "seq 는 정수")              # [알림문구]
     elif type_ == "fall_confirm":
         need(v.get("target_seat") in VALID_SEATS and _is_int(v.get("target_seat")),
              "target_seat 은 좌석 번호")

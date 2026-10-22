@@ -2,7 +2,9 @@
 AI 조교 상황 설명 (LLM). 기준: Confluence SD-08 AI 상황 설명.
 
     text, mode = explain_event(req, cfg)
-      req  = control 의 explain_request value {"event_id","kind","seat","elapsed_s","waiting_count"}
+      req  = control 의 explain_request value
+             {"event_id","kind","seat","situation","seq","status","queue_pos","elapsed_s","waiting_count",
+              "alert_stage","confirmed", (선점 때) "preempted_kind","preempted_seat"}
       mode = "gemini" | "ollama" | "default"   ← control db.py 가 이 세 값만 받는다 (다른 값이면 KeyError)
 
 순서: Gemini (5초) → 실패·타임아웃·빈 답이면 Ollama (로컬) → 그것도 안 되면 기본 문구.
@@ -14,6 +16,7 @@ Gemini 가 실패하면 gemini_cooldown_s(기본 60초) 동안은 Gemini 를 건
 
 단독 시험:
     python3 llm.py --kind fall --seat 3
+    python3 llm.py --kind fall --seat 3 --situation fall_neighbor --elapsed 15
     python3 llm.py --kind question --seat 2 --waiting 1 --only ollama
     python3 llm.py --warmup
     python3 llm.py --only gemini --timeout 20 --repeat 5     # Gemini 만, 20초까지 기다리며 5번
@@ -36,26 +39,49 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:ge
 KIND_KO = {"fall": "쓰러짐", "question": "질문(손 들기)", "away": "자리 비움"}
 DEFAULT_KIND_KO = {"fall": "쓰러짐", "question": "질문", "away": "자리 비움"}
 
-SYSTEM_PROMPT = """너는 강의실 AI 조교다. 카메라가 감지한 상황을 강사에게 알리는 짧은 설명을 쓴다.
+# control(event_manager) 이 explain_request 의 situation 으로 보내는 상황.  없으면 detect 로 본다 (예전 control 호환).
+SITUATIONS = ("detect", "again", "fall_neighbor", "fall_all", "fall_risen", "hand_down", "away_overdue")
+
+SYSTEM_PROMPT = """너는 강의실 AI 조교다. 카메라가 감지한 상황을 강사에게 알리는 짧은 알림 문구를 쓴다.
 규칙:
 - 한국어 존댓말로 한두 문장만 쓴다. 문장만 쓰고 따옴표, 제목, 머리말, 목록 기호는 붙이지 않는다.
-- 주어진 정보(종류, 좌석, 대기 건수)만 쓴다. 원인·이름·건강 상태를 추측하지 않는다.
+- 주어진 정보만 쓴다. 원인·이름·건강 상태를 추측하지 않는다.
 - 너는 알리기만 한다. "구급차를 부르겠습니다", "가겠습니다"처럼 직접 행동하겠다고 쓰지 않는다.
-- 종류별로 쓸 말:
-  - 쓰러짐: 쓰러진 것으로 감지되었다고 알리고 "바로 확인해 주세요"를 붙인다.
-  - 질문(손 들기): 손을 들고 질문을 기다린다고 알린다. "바로 확인해 주세요"는 쓰지 않는다.
-  - 자리 비움: 자리를 비웠다고만 알린다. "바로 확인해 주세요"는 쓰지 않는다.
-- 대기 중인 다른 요청이 1건 이상이면 끝에 "대기 중인 요청이 N건 더 있습니다."를 붙인다. 0건이면 대기 이야기는 쓰지 않는다.
+- 첫 문장에 좌석 번호와 지금 상황을 쓴다. 강사가 해야 할 일이 있으면 둘째 문장에 짧게 쓴다.
+- 단계별로 쓸 말:
+  - 새로 감지 / 쓰러짐: 쓰러진 것으로 감지되었다고 알리고 "바로 확인해 주세요"를 붙인다.
+  - 새로 감지 / 질문: 손을 들고 질문을 기다린다고 알린다.
+  - 새로 감지 / 자리 비움: 자리를 비웠다고만 알린다.
+  - 다른 요청을 미루고 이 사건으로 전환했다면, 미룬 요청(좌석·종류)을 짧게 덧붙인다.
+  - 대기 중(카메라가 다른 요청을 보는 중)이면 대기 순서를 덧붙인다.
+  - 옆자리 알림 / 전체 알림: 몇 초째 확인되지 않아 학생들에게 알림이 나갔다고 알리고 확인을 재촉한다.
+  - 일어남: 일어난 것으로 보이지만 확인이 필요하다고 쓴다. 괜찮다고 단정하지 않는다.
+  - 손 내림: 손을 내렸지만 질문은 아직 남아 있다고 쓴다.
+  - 다시 감지: "다시"를 넣어 쓴다.
+  - 미복귀: 몇 초째 돌아오지 않았다고 쓴다. 위급하다고 단정하지 않는다.
+- "바로 확인해 주세요"는 쓰러짐에만 쓴다.
 
 예시:
-상황: 종류=쓰러짐, 좌석=3번, 대기 중인 다른 요청=0건
+상황: 종류=쓰러짐, 좌석=3번, 단계=새로 감지, 카메라=지금 이 좌석을 봄, 대기 중인 다른 요청=0건
 설명: 3번 좌석 학생이 쓰러진 것으로 감지되었습니다. 바로 확인해 주세요.
 
-상황: 종류=질문(손 들기), 좌석=2번, 대기 중인 다른 요청=1건
-설명: 2번 좌석 학생이 손을 들고 질문을 기다리고 있습니다. 대기 중인 요청이 1건 더 있습니다.
+상황: 종류=쓰러짐, 좌석=1번, 단계=새로 감지, 카메라=지금 이 좌석을 봄, 미룬 요청=2번 좌석 질문(손 들기), 대기 중인 다른 요청=1건
+설명: 1번 좌석 학생이 쓰러진 것으로 감지되었습니다. 바로 확인해 주세요. 2번 좌석 질문은 잠시 대기합니다.
 
-상황: 종류=자리 비움, 좌석=4번, 대기 중인 다른 요청=0건
-설명: 4번 좌석 학생이 자리를 비웠습니다."""
+상황: 종류=질문(손 들기), 좌석=4번, 단계=새로 감지, 카메라=대기 2번째, 대기 중인 다른 요청=2건
+설명: 4번 좌석 학생이 손을 들고 질문을 기다리고 있습니다. 대기 순서는 2번째입니다.
+
+상황: 종류=쓰러짐, 좌석=3번, 단계=옆자리 알림 (15초째 강사 확인 없음, 옆자리 학생에게 알림 보냄)
+설명: 3번 좌석 쓰러짐이 15초째 확인되지 않아 옆자리 학생에게 알림을 보냈습니다. 지금 확인해 주세요.
+
+상황: 종류=쓰러짐, 좌석=3번, 단계=일어남 (일어난 것으로 보임, 아직 강사 확인 전)
+설명: 3번 좌석 학생이 일어난 것으로 보입니다. 상태를 한 번 확인해 주세요.
+
+상황: 종류=질문(손 들기), 좌석=2번, 단계=손 내림 (질문은 아직 열려 있음)
+설명: 2번 좌석 학생이 손을 내렸지만 질문은 아직 남아 있습니다.
+
+상황: 종류=자리 비움, 좌석=4번, 단계=미복귀 (60초째 돌아오지 않음)
+설명: 4번 좌석 학생이 60초째 자리에 돌아오지 않았습니다."""
 
 
 class LLMError(Exception):
@@ -87,16 +113,58 @@ def _mark_ok(mode: str):
 
 # ---------------------------------------------------------------- 프롬프트 / 기본 문구
 
+def _situation(req: dict) -> str:
+    sit = req.get("situation") or "detect"
+    return sit if sit in SITUATIONS else "detect"
+
+
+def _sec(req: dict) -> int:
+    return int(round(float(req.get("elapsed_s") or 0)))
+
+
+def _stage_text(req: dict) -> str:
+    """프롬프트에 넣는 '단계' 설명."""
+    sit, sec = _situation(req), _sec(req)
+    again = {"fall": "일어났다가 다시 쓰러짐", "question": "손을 내렸다가 다시 듦"}.get(req.get("kind"), "다시 감지")
+    return {
+        "detect": "새로 감지",
+        "again": f"다시 감지 ({again})",
+        "fall_neighbor": f"옆자리 알림 ({sec}초째 강사 확인 없음, 옆자리 학생에게 알림 보냄)",
+        "fall_all": f"전체 알림 ({sec}초째 강사 확인 없음, 반 전체 학생에게 알림 보냄)",
+        "fall_risen": "일어남 (일어난 것으로 보임, 아직 강사 확인 전)",
+        "hand_down": "손 내림 (질문은 아직 열려 있음)",
+        "away_overdue": f"미복귀 ({sec}초째 돌아오지 않음)",
+    }[sit]
+
+
 def build_prompt(req: dict) -> str:
     kind = KIND_KO.get(req.get("kind"), str(req.get("kind")))
-    waiting = int(req.get("waiting_count") or 0)
-    return f"상황: 종류={kind}, 좌석={req.get('seat')}번, 대기 중인 다른 요청={waiting}건\n설명:"
+    items = [f"종류={kind}", f"좌석={req.get('seat')}번", f"단계={_stage_text(req)}"]
+    if _situation(req) in ("detect", "again"):          # 처음 알릴 때만 카메라·대기열 정보를 붙인다
+        if req.get("status") == "waiting" and req.get("queue_pos"):
+            items.append(f"카메라=대기 {req['queue_pos']}번째")
+        elif req.get("status") == "active":
+            items.append("카메라=지금 이 좌석을 봄")
+        if req.get("preempted_kind"):
+            items.append(f"미룬 요청={req.get('preempted_seat')}번 좌석 "
+                         f"{KIND_KO.get(req['preempted_kind'], req['preempted_kind'])}")
+        items.append(f"대기 중인 다른 요청={int(req.get('waiting_count') or 0)}건")
+    return "상황: " + ", ".join(items) + "\n설명:"
 
 
 def default_text(req: dict) -> str:
-    """SD-08 No.8 build_default_text. 예: "3번 좌석 쓰러짐 감지" """
+    """LLM 이 모두 실패했을 때. SD-08 No.8 build_default_text 를 상황별로 넓힘. 예: "3번 좌석 쓰러짐 감지" """
+    seat, sec = req.get("seat"), _sec(req)
     kind = DEFAULT_KIND_KO.get(req.get("kind"), str(req.get("kind")))
-    return f"{req.get('seat')}번 좌석 {kind} 감지"
+    return {
+        "detect": f"{seat}번 좌석 {kind} 감지",
+        "again": f"{seat}번 좌석 {kind} 다시 감지",
+        "fall_neighbor": f"{seat}번 좌석 쓰러짐 {sec}초째 미확인 - 옆자리 학생에게 알림",
+        "fall_all": f"{seat}번 좌석 쓰러짐 {sec}초째 미확인 - 반 전체에 알림",
+        "fall_risen": f"{seat}번 좌석 학생 일어남 - 확인 필요",
+        "hand_down": f"{seat}번 좌석 손 내림 - 질문 대기 중",
+        "away_overdue": f"{seat}번 좌석 {sec}초째 자리 비움",
+    }[_situation(req)]
 
 
 _HANZI = re.compile(r"[一-鿿]")          # 중국어 한자 (qwen 이 가끔 섞음)
@@ -249,6 +317,8 @@ def main():
     ap.add_argument("--kind", default="fall", choices=sorted(KIND_KO))
     ap.add_argument("--seat", type=int, default=3)
     ap.add_argument("--waiting", type=int, default=0)
+    ap.add_argument("--situation", default="detect", choices=SITUATIONS, help="상황 (control 의 explain_request.situation)")
+    ap.add_argument("--elapsed", type=float, default=0.0, help="사건 후 지난 초 (fall_neighbor 15, away_overdue 60 등)")
     ap.add_argument("--only", choices=["gemini", "ollama", "default"], help="이 단계만 시험")
     ap.add_argument("--timeout", type=float, help="이번 시험에서만 Gemini 대기 초 (설정 파일은 안 바뀜)")
     ap.add_argument("--model", help="이번 시험에서만 쓸 Gemini 모델")
@@ -271,8 +341,8 @@ def main():
     print(f"Gemini {cfg['gemini_model']} 대기 {cfg['gemini_timeout_s']}초"
           f"{' / ' + str(args.repeat) + '회' if args.repeat > 1 else ''}\n")
 
-    req = {"event_id": 0, "kind": args.kind, "seat": args.seat,
-           "elapsed_s": 0.0, "waiting_count": args.waiting}
+    req = {"event_id": 0, "kind": args.kind, "seat": args.seat, "situation": args.situation,
+           "status": "active", "elapsed_s": args.elapsed, "waiting_count": args.waiting}
     results = []                                 # (mode, 걸린 초)
     for i in range(args.repeat):
         if i:

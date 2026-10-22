@@ -8,17 +8,31 @@
 ## AI 조교 흐름
 
 ```
-control ──explain_request {event_id, kind, seat, elapsed_s, waiting_count}──▶ vision_service
+control ──explain_request {event_id, kind, seat, situation, seq, ...}──────▶ vision_service
                                                                                   │
                          ① Gemini  (gemini-3.5-flash, 6초)                        │
                          ② 실패·타임아웃·잘린 답 → Ollama (qwen2.5:3b, 로컬)      │ llm.py
                          ③ 그것도 실패 → 기본 문구 "3번 좌석 쓰러짐 감지"          │
                                                                                   ▼
-control ◀──explain_text {event_id, text, mode: "gemini"|"ollama"|"default"}── vision_service
+control ◀──explain_text {event_id, text, mode, seq, situation}─────────────── vision_service
    └─ help_event.explain_text / explain_mode 저장 → 강사 화면 event_update
 ```
 
 - 어떤 경우에도 `explain_text` 는 꼭 간다 (최악이면 기본 문구).
+- **상황별 알림 문구 (기능 1):** control 은 이벤트가 생길 때뿐 아니라 상황이 바뀔 때마다 다시 요청한다.
+  문구는 강사 화면의 그 이벤트에 덮어써진다.
+
+  | situation | 언제 | 문구 예 (기본 문구) |
+  | --- | --- | --- |
+  | `detect` | 새 사건 (선점·대기 순서 포함) | 3번 좌석 쓰러짐 감지 |
+  | `again` | 손 내림·일어남 뒤 다시 감지 | 2번 좌석 질문 다시 감지 |
+  | `fall_neighbor` | 쓰러짐 15초 미확인 → 옆자리 학생 알림 | 3번 좌석 쓰러짐 15초째 미확인 - 옆자리 학생에게 알림 |
+  | `fall_all` | 쓰러짐 30초 미확인 → 전체 알림 | 3번 좌석 쓰러짐 30초째 미확인 - 반 전체에 알림 |
+  | `fall_risen` | 일어남 (확인 전) | 3번 좌석 학생 일어남 - 확인 필요 |
+  | `hand_down` | 손 내림 | 2번 좌석 손 내림 - 질문 대기 중 |
+  | `away_overdue` | 자리 비움 60초 초과 | 4번 좌석 60초째 자리 비움 |
+
+  `seq` 는 요청 번호다. 문구를 만드는 사이 더 새 요청이 나가면 control 이 늦게 온 옛 문구를 버린다.
 - `mode` 는 `"gemini"`, `"ollama"`, `"default"` 셋 중 하나만 보낸다. control `db.py` 가 이 세 값만 숫자로 바꾼다.
 - Gemini 가 한 번 실패하면 **60초 동안 Gemini 를 건너뛰고** 바로 Ollama 로 간다 (죽어 있는 동안 사건마다 6초씩 버리지 않게).
 - LLM 에는 `kind`, `seat`, `waiting_count` 만 보낸다. 학생 이름 등 개인정보는 보내지 않는다.
@@ -28,6 +42,7 @@ control ◀──explain_text {event_id, text, mode: "gemini"|"ollama"|"default"
 
 | 파일 | 내용 |
 | --- | --- |
+| `alert_demo.py` | **알림 문구 터미널 시험.** vision_service·강사 화면 역할로 control 에 붙어 사건을 넣고 문구를 본다 |
 | `run_assistant.py` | 노드 실행 파일. `explain_request` 를 받으면 별도 스레드에서 `llm.explain_event` 호출 (동시 2개까지). 시작할 때 Ollama 모델을 미리 올림 |
 | `llm.py` | Gemini → Ollama → 기본 문구. 프롬프트, 답 다듬기·검사, 단독 시험 명령 |
 | `assistant_config.py` | `config/assistant.yaml` + `.env` 읽기 |
@@ -96,7 +111,31 @@ python3 llm.py --only gemini --timeout 30 --repeat 5        # Gemini 를 30초�
 python3 llm.py --only gemini --model gemini-3.1-flash-lite --repeat 5   # 다른 모델 비교 (설정 파일은 안 바뀜)
 ```
 
-### control 과 연결 (터미널 3개)
+### 알림 문구 터미널 시험 (control 과 TCP 로 주고받음)
+
+```bash
+# 터미널 1: control
+cd service/jarvis_control_service && python3 run_hub.py
+# 터미널 2: (run_assistant.py 는 끈 상태로)
+cd service/jarvis_vision_service
+python3 alert_demo.py --auto      # 정해진 시나리오 약 45초: 질문 → 쓰러짐 선점 → 대기 → 손 내림 → 일어남 → 15/30초 알림 → 완료
+python3 alert_demo.py             # 직접 입력: f 3 / q 2 / a 4 (뒤에 end 붙이면 종료), c 1 확인, r 1 완료, d 1 오감지, ls
+python3 alert_demo.py -v          # LLM 실패·건너뜀 로그도 보기
+```
+
+출력 예:
+
+```
+   6.1s  -> 3번 쓰러짐 start
+   6.1s     [상태] #1 2번 질문 대기(waiting)
+   6.1s     … 문구 요청 #2 새로 감지 (seq 1)
+  10.3s  📢 [알림] #2 3번 쓰러짐 · 새로 감지  (gemini 4.2s)
+  10.3s            3번 좌석 학생이 쓰러진 것으로 감지되었습니다. 바로 확인해 주세요. 2번 좌석 질문은 잠시 대기합니다.
+```
+
+LLM 만 상황별로: `python3 llm.py --kind fall --seat 3 --situation fall_neighbor --elapsed 15`
+
+### control 과 연결 (터미널 3개, 실제 노드)
 
 ```bash
 # 1: control

@@ -6,6 +6,7 @@ vision_service 노드 실행 파일. VS Code에서 이 파일을 열고 Run Code
 - 사건(fall/question/away)은 판정이 확정·해제되는 순간 한 번만 보낸다. 유지 시간은 여기서 지킨다.
 - track_target 을 받으면 그 좌석을 추적하며 track_offset 을 10~15회/초 보낸다.
 - explain_request 를 받으면 LLM(Gemini 기본, Ollama 백업) 설명을 explain_text 로 돌려준다.
+  control 은 상황이 바뀔 때마다(새 사건, 쓰러짐 15/30초, 일어남, 손 내림, 자리비움 미복귀) 다시 요청한다.
 
 터미널에서는:  python3 run_assistant.py [--server 127.0.0.1]
 """
@@ -57,8 +58,11 @@ def explain(client: NodeClient, req: dict):
         except Exception:                   # 혹시 모를 오류에도 기본 문구는 꼭 보낸다
             logging.getLogger("llm").exception("설명 실패 event=%s", req.get("event_id"))
             text, mode = llm.default_text(req), "default"
-    client.send("explain_text", value={"event_id": req["event_id"], "text": str(text), "mode": mode})
-    print(f"-> explain_text event={req['event_id']} [{mode}] {text}")
+    value = {"event_id": req["event_id"], "text": str(text), "mode": mode}
+    if "seq" in req:                        # control 이 늦게 온 옛 응답을 거를 수 있게 그대로 돌려준다
+        value["seq"], value["situation"] = req["seq"], req.get("situation")
+    client.send("explain_text", value=value)
+    print(f"-> explain_text event={req['event_id']} {req.get('situation', 'detect')} [{mode}] {text}")
 
 
 def detect() -> dict:

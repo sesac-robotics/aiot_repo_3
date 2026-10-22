@@ -7,6 +7,9 @@
 - 시계는 항상 인자로 받는다(now = control 시계 rx_ts). 가짜 시계로 테스트할 수 있다.
 - [팬틸트] 팬틸트는 Control 내부 모듈(hub/pantilt)이다. to="pantilt" 인 Send 는
   hub 가 PanTiltService 메서드 호출로 바꿔 실행한다 (TCP 로 보내지 않음).
+- [알림문구] 상황이 바뀌는 순간(새 사건·선점, 쓰러짐 15/30초, 일어남, 손 내림, 자리비움 미복귀)마다
+  vision_service 에 explain_request {situation, ...} 를 보내 강사용 알림 문구를 다시 만든다.
+  응답 explain_text 의 seq 가 마지막 요청과 다르면(늦게 온 옛 응답) 버린다.
 - [녹화] 이벤트 녹화(event_clip)를 언제 시작·끝낼지도 여기서 정한다. to="recorder" 인 Send
   (start {event_id, seat, kind} / stop {event_id}) 를 hub 가 ClipRecorder(hub/clip_recorder.py) 호출과
   db.py 기록으로 바꾼다. 녹화 구간 = 이벤트 확정(detect) ~ 종료(resolve·dismiss·expire·clear).
@@ -58,6 +61,8 @@ class HelpEvent:
     # ---- 화면 표시용 (DB 에는 없음) ----
     risen: bool = False            # fall end: 일어남 (닫지 않음, 사람이 판단)
     overdue: bool = False           # away 가 away_alert_s 지나도록 미복귀
+    explain_seq: int = 0            # [알림문구] 마지막 explain_request 번호 (늦은 응답 거르기)
+    explain_situation: str | None = None   # [알림문구] 지금 explain_text 가 설명하는 상황
 
     @property
     def is_open(self) -> bool:
@@ -147,12 +152,14 @@ class EventManager:
                 if ev.hand_down or ev.risen:          # 다시 손을 듦 / 다시 쓰러짐
                     ev.hand_down = ev.risen = False
                     self._update(ev)
+                    self._explain(ev, now, "again")    # [알림문구]
                 return self._flush()
             ev = HelpEvent(event_id=self.next_id, seat=seat, kind=kind,
                            priority=self.priority[kind], status="waiting",
                            detected_at=now, source=source)
             self.next_id += 1
             self.events[ev.event_id] = ev
+            prev_active = self.active                 # [알림문구] 선점 여부를 알려 주려고
             self._save(ev)
             self._log(ev, now, "detect", SYSTEM, {"source": source})
             self._record_start(ev)                  # [녹화] 확정 시각부터 cam2 녹화
@@ -160,10 +167,10 @@ class EventManager:
             if ev.status == "waiting":
                 self._log(ev, now, "wait", SYSTEM)
                 self._update(ev)
-            self._send(VISION_NODE, "explain_request", {
-                "event_id": ev.event_id, "kind": kind, "seat": seat,
-                "elapsed_s": round(now - ev.detected_at, 1),
-                "waiting_count": sum(1 for e in self.events.values() if e.status == "waiting")})
+            preempted = prev_active if (prev_active is not None and ev.status == "active") else None
+            self._explain(ev, now, "detect",                                      # [알림문구]
+                          {"preempted_kind": preempted.kind, "preempted_seat": preempted.seat}
+                          if preempted else None)
             return self._flush()
 
         # ---- end ----
@@ -173,10 +180,13 @@ class EventManager:
             if not ev.hand_down:
                 ev.hand_down = True
                 self._update(ev)
+                self._explain(ev, now, "hand_down")    # [알림문구]
         elif kind == "fall":                   # 자동으로 닫지 않는다. "일어남" 표시만
             if not ev.risen:
                 ev.risen = True
                 self._update(ev)
+                if ev.confirmed_at is None:           # [알림문구] 확인 전이면 "일어났지만 확인 필요"
+                    self._explain(ev, now, "fall_risen")
         elif kind == "away":                   # 복귀 -> 종료
             self._close(ev, now, "cleared", "clear", SYSTEM)
             self._reschedule(now)
@@ -219,9 +229,13 @@ class EventManager:
         self._reschedule(now)
         return self._flush()
 
-    def on_explain_text(self, event_id: int, text: str, mode: str | None, now: float) -> Effects:
+    def on_explain_text(self, event_id: int, text: str, mode: str | None, now: float,
+                        seq: int | None = None) -> Effects:
         ev = self.events.get(event_id)
         if ev is None:
+            return self._flush()
+        if seq is not None and seq != ev.explain_seq:    # [알림문구] 더 새 요청이 나간 뒤 늦게 온 옛 응답
+            log.info("explain_text 무시: event %s seq %s (최신 %s)", event_id, seq, ev.explain_seq)
             return self._flush()
         ev.explain_text, ev.explain_mode = text, mode
         self._save(ev)
@@ -321,6 +335,7 @@ class EventManager:
                 ev.overdue = True
                 self._log(ev, now, "alert", SYSTEM, {"stage": "away_overdue"})
                 self._update(ev)
+                self._explain(ev, now, "away_overdue")  # [알림문구]
         # 4. 대기열 맨 앞이 바뀌었으면 교체
         if changed:
             self._reschedule(now)
@@ -418,6 +433,7 @@ class EventManager:
         self._update(ev)
         self._send_students(self._alert_targets(ev), "fall_alert",
                             {"target_seat": ev.seat, "stage": stage})
+        self._explain(ev, now, "fall_" + stage)                       # [알림문구] fall_neighbor / fall_all
 
     def _alert_targets(self, ev: HelpEvent) -> list[str]:
         """지금 alert_stage 에서 fall_alert 를 받은 학생 노드들."""
@@ -426,6 +442,26 @@ class EventManager:
         if ev.alert_stage == "all":
             return list(STUDENT_NODES)
         return []
+
+    def _explain(self, ev: HelpEvent, now: float, situation: str, extra: dict | None = None):   # [알림문구]
+        """vision_service 에 지금 상황의 알림 문구를 요청한다.
+        situation: detect | again | fall_neighbor | fall_all | fall_risen | hand_down | away_overdue"""
+        ev.explain_seq += 1
+        ev.explain_situation = situation
+        waiting = [e.event_id for e in self._sorted_open() if e.status == "waiting"]
+        value = {
+            "event_id": ev.event_id, "kind": ev.kind, "seat": ev.seat,
+            "situation": situation, "seq": ev.explain_seq,
+            "status": ev.status,                                      # active(추적 중) | waiting
+            "queue_pos": waiting.index(ev.event_id) + 1 if ev.event_id in waiting else 0,
+            "elapsed_s": round(now - ev.detected_at, 1),
+            "waiting_count": len(waiting),
+            "alert_stage": ev.alert_stage,
+            "confirmed": ev.confirmed_at is not None,
+        }
+        if extra:
+            value.update(extra)
+        self._send(VISION_NODE, "explain_request", value)
 
     def _record_start(self, ev: HelpEvent):                            # [녹화]
         self._send(RECORDER, "start", {"event_id": ev.event_id, "seat": ev.seat, "kind": ev.kind})
