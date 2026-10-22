@@ -3,6 +3,12 @@
 Calibration uses run_fixed_vision.py before starting the streamers.
 Seats: every seat registered in fixed_seats.local.json (--only-seat N for a one-seat test).
 cam2 tracking refuses multi-person frames (no cross-camera identity yet).
+
+AI 조교(LLM) 기능 (main 에서 합침, llm/ 폴더):
+- explain_request 를 받으면 LLM(Gemini 기본, Ollama 백업) 설명을 explain_text 로 돌려준다.
+- [질의] ask_request 를 받으면 ask.py 가 LLM tool calling 으로 답을 만들어 ask_answer 로 돌려준다
+  (도구는 tool_call 로 control 에 실행을 맡긴다).
+- [리포트] report_write 를 받으면 report.py 가 오늘 숫자를 읽고 요약·살펴볼 점을 써서 report_text 로 돌려준다.
 """
 import argparse
 import json
@@ -16,6 +22,8 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# AI 조교(LLM) 모듈은 llm/ 폴더에 있다 (llm.py, ask.py, report.py, assistant_config.py, config/assistant.yaml)
+sys.path.insert(0, str(Path(__file__).resolve().parent / "llm"))
 from common.config import load_config
 from common.node_client import NodeClient
 from common.protocol import VISION_NODE, VIDEO_HEADER, VISION_VIDEO_PORTS
@@ -23,10 +31,35 @@ from fixed_camera.config import load
 from fixed_camera.core import Person, SeatMatcher, valid_point
 from fixed_camera.seat_report import SeatReport
 
+import ask                                     # [질의] 강사 자연어 질의 + tool calling
+import llm                                     # AI 조교 설명 (Gemini → Ollama → 기본 문구)
+import report                                  # [리포트] 수업 종료 리포트 문장
+from assistant_config import load_assistant_config
+
 log = logging.getLogger('vision')
 ROOT = Path(__file__).resolve().parent
 WARN_S = 10.0           # 같은 경고(버린 프레임, 처리 오류, 영상 비율)를 다시 찍기까지 최소 간격
 MIN_SEAT_FPS = 2.0      # Control 판정은 관측 간격 0.8초(약 1.25 fps)를 넘으면 처음부터 다시 센다 → 여유를 두고 경고
+
+LLM_CFG = load_assistant_config()                                     # config/assistant.yaml + .env
+explain_slots = threading.Semaphore(int(LLM_CFG.get("max_concurrent", 2)))   # 동시 설명 요청 수 제한
+
+
+def explain(client: NodeClient, req: dict):
+    """LLM 으로 상황 설명을 만들어 explain_text 로 돌려준다 (Gemini -> Ollama -> 기본 문구).
+    llm.explain_event 는 예외를 던지지 않고 항상 (문자열, "gemini"|"ollama"|"default") 를 준다.
+    text 는 꼭 문자열로 보낸다 (control 이 문자열이 아니면 버림)."""
+    with explain_slots:                     # 사건이 몰려도 LLM 을 동시에 너무 많이 부르지 않게
+        try:
+            text, mode = llm.explain_event(req, LLM_CFG)
+        except Exception:                   # 혹시 모를 오류에도 기본 문구는 꼭 보낸다
+            logging.getLogger("llm").exception("설명 실패 event=%s", req.get("event_id"))
+            text, mode = llm.default_text(req), "default"
+    value = {"event_id": req["event_id"], "text": str(text), "mode": mode}
+    if "seq" in req:                        # control 이 늦게 온 옛 응답을 거를 수 있게 그대로 돌려준다
+        value["seq"], value["situation"] = req["seq"], req.get("situation")
+    client.send("explain_text", value=value)
+    log.info("-> explain_text event=%s %s [%s] %s", req["event_id"], req.get("situation", "detect"), mode, text)
 
 
 def nose_target(people):
@@ -129,17 +162,33 @@ def main():
     target = {'seat': None, 'gen': 0, 'since': time.time()}
     failures = queue.Queue()
 
+    workers = {}                                  # [질의] asker, [리포트] reporter (client 를 만든 뒤 채움)
+
     def on_message(msg):
+        """control 이 보낸 메시지 (수신 스레드에서 불림)."""
+        for worker_ in workers.values():          # [질의] ask_request / tool_result, [리포트] report_write
+            if worker_.on_message(msg):
+                return
         v = msg['value']
         if msg['type'] == 'track_target':
             with lock:
                 target.update(seat=v.get('seat'), gen=v['gen'], since=time.time())
             log.info('Target %s', target)
         elif msg['type'] == 'explain_request':
-            client.send('explain_text', value={'event_id': v['event_id'],
-                'text': f"{v['seat']}번 좌석 {v['kind']}", 'mode': 'default'})
+            # LLM 호출은 느리므로 따로 돌린다 (수신 스레드를 막으면 track_target 이 늦게 온다)
+            threading.Thread(target=explain, args=(client, v), daemon=True).start()
 
     client = NodeClient(VISION_NODE, cfg['control_host'], int(cfg['control_port']), on_message=on_message)
+    workers['asker'] = ask.AskWorker(client, LLM_CFG, on_answer=lambda req, res: log.info(
+        "-> ask_answer #%s [%s %ss, 도구 %d번] %s", req['ask_id'], res['mode'], res['took_s'],
+        len(res['tools']), res['text'][:80]))
+    workers['reporter'] = report.ReportWorker(client, LLM_CFG, on_done=lambda req, res: log.info(
+        "-> report_text #%s [%s %ss] %s", req['report_id'], res['mode'], res['took_s'], res['summary'][:80]))
+    log.info("AI 조교: gemini=%s, ollama=%s",
+             LLM_CFG['gemini_model'] if LLM_CFG.get('gemini_api_key') else '키 없음(건너뜀)', LLM_CFG['ollama_model'])
+    if LLM_CFG.get("ollama_warmup", True):
+        # Ollama 모델을 미리 GPU 에 올려 둔다 (첫 설명이 느리지 않게). 감지 루프를 막지 않게 따로 돌린다.
+        threading.Thread(target=llm.warmup, args=(LLM_CFG,), daemon=True).start()
     receivers = []
     threads = []
 
@@ -148,7 +197,7 @@ def main():
         rec = {'writer': None, 'timeline': None, 'on': bool(args.record_dir)}
         kpt_log = open(args.record_keypoints, 'a', encoding='utf-8') if (args.record_keypoints and cam == 1) else None
         matcher = SeatMatcher(calibration)
-        report = SeatReport()                     # cam1: 좌석별 판정 요약 (10초마다 로그)
+        seat_report = SeatReport()                # cam1: 좌석별 판정 요약 (10초마다 로그)
         stats = {'count': 0, 'started': time.time()}
         warned = {'error': 0., 'aspect': 0.}
 
@@ -219,7 +268,7 @@ def main():
                         'people': [{'box': [round(v, 4) for v in p.box], 'id': p.track_id, 'conf': round(p.confidence, 3),
                                     'kpts': [[round(v, 4) for v in kp] for kp in p.keypoints]} for p in people],
                         'seats': rows}, ensure_ascii=False) + '\n')
-                line = report.add(rows, now)
+                line = seat_report.add(rows, now)
                 if line:
                     log.info('좌석 판정 %s', line)
                 client.send('seat_obs', value={'session': session, 'frame_id': fid,

@@ -10,7 +10,7 @@ ARM_MS = 1000           # 쓰러짐 창이 뜬 뒤 이 시간 동안은 [확인�
 
 
 class RegisterDialog(QDialog):
-    """⓪ 자리 등록: 이름 입력 → [등록 시작] → 바른 자세 10초 (→ 영역 값이 없으면 영역 측정, [다음])"""
+    """⓪ 자리 등록: 이름 입력 → [등록 시작] → 바른 자세 10초 → 보는 방향 측정 ([다음]). 규칙 모드는 방향 측정 없음"""
     start_requested = pyqtSignal(str)          # 이름
     next_requested = pyqtSignal()              # 영역 측정 다음 단계 (Space)
 

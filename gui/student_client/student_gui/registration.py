@@ -51,7 +51,7 @@ class RegisterFlow:
         if self.dialog is not None:
             self.dialog.raise_()
             return
-        self.dialog = RegisterDialog(self.seat, self.name or "", self.win)
+        self.dialog = RegisterDialog(self.seat, "", self.win)      # 앉은 사람이 바뀔 수 있으므로 이름부터 다시 입력
         self.dialog.start_requested.connect(self._start)
         self.dialog.next_requested.connect(self.engine.next_zone)
         self.dialog.finished.connect(self._closed)
@@ -90,7 +90,7 @@ class RegisterFlow:
         sent = self.link.send_register(self.name, baseline, zones)
         if self.dialog is not None:
             where = "중앙 서버에 저장했습니다." if sent else "이 노트북에 저장했습니다."
-            more_zones = self.need_zones and not zones
+            more_zones = self.need_zones                 # [자리 등록]은 방향도 항상 다시 잰다 (forget_zones)
             more = "\n이어서 보는 방향을 잽니다. 안내에 따라 [다음]을 눌러 주세요." if more_zones else ""
             # 방향 측정이 이어지면 [닫기]는 숨기고 안내를 계속 받는다 (닫으면 측정은 계속되는데 안내만 사라짐)
             self.dialog.finish(f"{self.name}님, 바른 자세를 등록했어요. {where}{more}", closable=not more_zones)

@@ -12,6 +12,7 @@
 - **카메라 영상은 Control을 거쳐 Vision Service로 간다** (10/21 설계 변경). 두 Camera Streamer(팬틸트·고정) → Control (UDP) → Vision Service (UDP).
   Vision의 판정 결과·사건은 TCP(`NodeClient`)로 Control에 온다.
 - 영상 중계는 판단이 아니다. `event_manager`를 거치지 않고 DB에도 기록하지 않는다. 중계 때문에 asyncio 루프(0.1초 `tick`)가 막히면 안 된다.
+  예외는 **이벤트 녹화**(`event_clip`): 녹화 시작·종료 시점은 `event_manager`가 정하고(`to="recorder"`), cam2 프레임 디코딩·MP4 쓰기는 `hub/clip_recorder.py` 작업 스레드가 한다.
 - **판단(우선순위, 선점, 대기열, 단계 알림, 만료, 추적 대상)은 `event_manager.py` 한 곳에서만 한다.** 화면도 Vision도 판단하지 않는다.
 - **DB에 쓰는 곳은 `db.py`뿐이다.** 다른 도구는 읽기만 한다. DB는 SQLite 파일 하나.
 - LLM 상황 설명: Gemini API가 기본, Ollama가 백업.
@@ -29,14 +30,17 @@ aiot_repo_3/
 ├─ gui/student_client/run_client.py           student_client_N 노드 (--seat N)
 ├─ service/jarvis_control_service/            control 서버 (이 폴더)
 │   ├─ hub/hub.py, event_manager.py, db.py
-│   ├─ hub/control_config.py                  control 전용: control.yaml 읽기, DB·스키마 경로
+│   ├─ hub/control_config.py                  control 전용: control.yaml 읽기, DB·스키마·녹화 경로
+│   ├─ hub/video_relay.py                     UDP 영상 중계 (cam2 프레임은 녹화로도 넘김)
+│   ├─ hub/clip_recorder.py                   이벤트 녹화 (cam2 → MP4, 작업 스레드)
 │   ├─ config/control.yaml                    좌석 각도·옆자리·타이머 (control 만)
 │   ├─ db/hub.db                              SQLite 파일
 │   ├─ tools/
 │   └─ run_hub.py, run_client.py
 ├─ service/jarvis_DB/create.sql               DB 스키마 원본 (db.py 가 시작할 때 실행)
+├─ service/jarvis_DB/clips/{event_id}.mp4     이벤트 녹화 파일 (git 제외, DB event_clip.path = "clips/{event_id}.mp4")
 ├─ service/jarvis_vision_service/run_assistant.py   vision_service 노드
-├─ hw/camera_controller/run_controller.py     camera_controller 노드 (Serial → Arduino)
+├─ hw/camera_controller/camera_controller.ino Uno 펌웨어 (팬틸트는 Control 안의 hub/pantilt 가 USB 시리얼로 직접 움직임)
 └─ hw/camera_streamer/                        UDP 영상 송출 → Control (TCP 노드 아님)
     ├─ run_fixed_camera.py                    고정 카메라(내장 웹캠, cam1)
     ├─ run_pantilt_camera.py                  팬틸트 카메라(USB, cam2)
@@ -62,6 +66,8 @@ aiot_repo_3/
 python3 run_hub.py                                  # control 서버 (또는 python3 -m hub -v)
 python3 -m unittest tools.test_event_manager -v     # event_manager 단위 테스트 (가짜 시계)
 python3 -m unittest tools.test_protocol -v          # 바이너리 프레임 단위 테스트 (왕복, 스트림 쪼개짐, CRC, 깨진 바이트)
+python3 -m unittest tools.test_ask_tools -v         # [질의] 도구 6개 (검색 조건, 통계, 인자 오류, 학생 이름 안 나감)
+python3 -m unittest tools.test_clip_recorder -v     # 이벤트 녹화: 가짜 cam2 JPEG → MP4, event_clip 상태 1→2→3, clip_info, 재시작
 python3 -m tools.fake_node --server 127.0.0.1       # 통신 시나리오: 질문 → 쓰러짐 선점 → confirm/resolve
 python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fall_alert 까지
 ```
@@ -91,8 +97,17 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 - `track_offset`은 메시지의 `seat`이 지금 active 좌석과 같아야 처리한다. Vision은 `seat`을 꼭 채운다.
 - nudge 각도 = `dx·nudge_gain`, `dy·nudge_gain`. 방향이 반대면 `nudge_gain`을 음수로 한다.
 - `class_condition`은 최근 30초 안에 보고한 학생만으로 비율을 내고, `reporting`(보고한 수)도 같이 보낸다.
-- 다시 접속한 `vision_service`·`camera_controller`에는 지금 추적 대상(`track_target`, `pan_tilt preset/home`)을 다시 보낸다.
+- [세부컨디션] `detail` = 세부 6개(drowsy 졸음 · yawn 하품 · not_forward 전방 주시 미흡 / forward_lean 앞으로 숙임 · head_tilt 고개 기울임 · shoulder_tilt 어깨 비대칭)의 반 비율. 항목마다 **그 키를 보낸 학생만** 분모로 센다(옛 클라이언트 제외). 보낸 학생이 `condition.detail_min_students`(control.yaml, 테스트 중 1명, 운영 3명 권장)보다 적으면 `null`. 강사 화면은 보고 학생이 3명 미만이면 "반 평균 ≈ 그 학생 값" 안내를 띄운다.
+- 다시 접속한 `vision_service`에는 지금 추적 대상(`track_target`)을 다시 보낸다.
 - `NodeClient`는 끊긴 동안 사건 외에 `confirm`·`resolve`·`fall_confirm`도 모아 두었다가 보낸다.
+- [녹화] 열린 이벤트는 **active든 waiting이든 모두** 확정~종료 구간을 녹화한다 (Data Structure v2 `started_at`=확정, `ended_at`=종료 그대로).
+  팬틸트는 active 좌석만 보므로 waiting 구간 영상은 다른 좌석이 찍힌다. active 구간만 남길지는 팀 논의.
+- [녹화] 같은 cam2 영상을 이벤트마다 따로 파일로 쓴다 (동시 이벤트 2건이면 파일 2개).
+- [녹화] 녹화 시각은 Control 시계(프레임 수신 시각). 10fps 고정, 15fps 입력은 솎고 2초 이하 끊김은 마지막 장면 반복, 그 이상은 이어 붙인다.
+- [녹화] cam2 영상을 한 장도 못 받은 녹화(카메라 꺼짐)는 파일을 만들지 않고 status 3(삭제됨)으로 남긴다.
+- [녹화] 코덱은 `avc1`(H.264)을 먼저 시도하고 안 되면 `mp4v`. pip OpenCV는 보통 `mp4v`가 된다.
+- [녹화] `event_clip.path`는 `service/jarvis_DB` 기준 상대 경로. `clips.dir`을 그 밖으로 바꾸면 절대 경로가 들어간다.
+- [녹화] Control이 강제 종료(kill)되면 녹화 중이던 MP4는 끝이 안 써져 재생이 안 될 수 있다. Ctrl+C 종료는 파일을 닫고 status 2로 저장한다.
 
 ## 10/19 결정 사항
 
@@ -128,7 +143,7 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 
 그림과 아직 다른 점:
 
-- DEV-03 그림은 Control → Serial → Camera Controller. 코드는 Control → `camera_controller` 노드(TCP) → Serial → Arduino. 시리얼 포트는 그 노드만 잡는다 (같은 PC에서 돌아도 됨).
+- DEV-03 Control → USB Serial → Arduino Uno. 팬틸트는 TCP 노드가 아니라 Control 프로세스 안의 `hub/pantilt`(PanTiltService)다. 시리얼 포트는 Control만 잡는다. (예전 `camera_controller` TCP 노드·`run_controller.py`는 없앰)
 
 ## 이름 규칙 (소문자_밑줄)
 
@@ -138,7 +153,7 @@ python3 -m tools.fake_node --server 127.0.0.1 --fall-wait 31   # 15초/30초 fal
 | --- | --- | --- |
 | `control` | run_hub.py | hub가 보내는 메시지의 node 값 |
 | `vision_service` | run_assistant.py | 기존 fixedcam/tracker 대체 |
-| `camera_controller` | run_controller.py | 신규 |
+| `camera_controller` | (없음) | 예전 팬틸트 TCP 노드. 지금은 Control 안의 `hub/pantilt` (노드 코드 2는 DB 장비 '팬틸트(가상)'로 남김) |
 | `instructor_console` | run_console.py | 신규, 메인 대시보드 |
 | `student_client_1` ~ `student_client_4` | run_client.py | 기존 student1~4 |
 
@@ -195,19 +210,20 @@ vision_service ↔ control:
 | --- | --- | --- | --- |
 | ↑ | `fall`/`question`/`away` | `{"state":"start"\|"end"}` | 판정 확정/해제 순간 한 번 (유지 시간은 Vision이 지킴) |
 | ↑ | `track_offset` | `{"found":true,"dx":0.12,"dy":-0.05}` | 추적 중 10~15회/초. `messages`에 기록 안 함 |
-| ↑ | `explain_text` | `{"event_id","text","mode":"gemini"\|"ollama"\|"default"}` | 설명 요청 응답 |
+| ↑ | `explain_text` | `{"event_id","text","mode":"gemini"\|"ollama"\|"default","seq","situation"}` | 설명 요청 응답. `seq`가 마지막 요청과 다르면 버림 (없으면 받음) |
 | ↑ | `heartbeat` | `{"fps","cpu","cam1_fps","cam2_fps"}` | 2초마다 |
 | ↓ | `track_target` | `{"seat":2}` 또는 `{"seat":null}` | 추적 대상 변경 시 |
-| ↓ | `explain_request` | `{"event_id","kind","seat","elapsed_s","waiting_count"}` | 새 이벤트 발생 시 (비동기) |
+| ↓ | `explain_request` | `{"event_id","kind","seat","situation","seq","status","queue_pos","elapsed_s","waiting_count","alert_stage","confirmed"}` (+선점 시 `preempted_kind`,`preempted_seat`) | [알림문구] 상황이 바뀔 때마다 (아래 표, 비동기) |
+| ↓ | `ask_request` | `{"ask_id","text","now"}` | [질의] 강사 질문을 넘김 (`now` = control 지역 시각) |
+| ↑ | `tool_call` | `{"ask_id","call_id","name","args"}` | [질의] LLM 이 고른 도구 실행 요청 |
+| ↓ | `tool_result` | `{"ask_id","call_id","name","result"}` | [질의] `hub/ask_tools.py` 실행 결과 (오류도 `{"error"}` 로) |
+| ↑ | `ask_answer` | `{"ask_id","text","mode":"gemini"\|"ollama"\|"rule"\|"default","tools":[{name,args,summary}],"took_s","fallback"}` | [질의] 최종 답 → 물어본 Console 로 그대로 |
+| ↓ | `report_write` | `{"report_id","data","now"}` | [리포트] 오늘 숫자를 주고 문장 작성 요청 |
+| ↑ | `report_text` | `{"report_id","summary","suggestions":[...],"mode","took_s","fallback"}` | [리포트] 요약 2~3문장 + 살펴볼 점 0~3개 |
 
-control ↔ camera_controller:
-
-| 방향 | type | value | 때 |
-| --- | --- | --- | --- |
-| ↓ | `pan_tilt` | `{"mode":"preset","seat":2,"pan":80,"tilt":85}` | 추적 대상 변경 시. 각도는 control이 control.yaml에서 읽어 싣는다 |
-| ↓ | `pan_tilt` | `{"mode":"nudge","dpan":1.5,"dtilt":-0.8}` | `track_offset` 수신 시 (최대 10Hz) |
-| ↓ | `pan_tilt` | `{"mode":"home"}` | 대상 없을 때 |
-| ↑ | `pan_tilt_state` | `{"pan":95,"tilt":80,"ok":true}` | 명령 적용 후 (Serial `OK` 전달) |
+팬틸트: TCP 메시지가 아니다. `event_manager`의 `to="pantilt"` 할 일을 hub가 `PanTiltService` 메서드(preset·home·track·jog·save)로 부르고,
+팬틸트 알림(`pan_tilt_state`, `preset_saved`)은 이벤트 루프로 넘겨 받는다 (`hub/pantilt/README.md`).
+`protocol.py`의 `pan_tilt`·`pan_tilt_state`는 예전 노드용으로 남아 있을 뿐 쓰지 않는다.
 
 control ↔ instructor_console:
 
@@ -216,10 +232,55 @@ control ↔ instructor_console:
 | ↓ | `event_update` | help_event 한 행 전체 | 이벤트 생성/변경마다 |
 | ↓ | `queue_state` | `{"active":17,"waiting":[18,15]}` | 대기열 변경 시 |
 | ↓ | `device_update` | `{"node","online","note"}` | 장비 상태 변경 시 |
-| ↓ | `class_condition` | `{"focus_low_ratio","posture_bad_ratio"}` | 10초마다 (반 평균만) |
-| ↓ | `snapshot` | 열린 이벤트 전체 + 장비 상태 | Console 접속/재접속 시 |
+| ↓ | `class_condition` | `{"focus_low_ratio","posture_bad_ratio","reporting","detail":{drowsy..shoulder_tilt: 0~1 \| null}}` | 10초마다 (반 평균만) |
+| ↓ | `snapshot` | `{events, queue, devices, seats}` 열린 이벤트 + 장비 상태 + 좌석(옆자리·학생 이름) | Console 접속/재접속 시 |
+| ↓ | `seat_info` | `{seat, label, neighbors, has_preset, student_name, registered_at}` | 학생 [자리 등록] 시 |
+| ↓ | `preset_saved` | `{seat, pan, tilt}` | 팬틸트 각도 저장 후 |
 | ↑ | `confirm` | `{"event_id":17}` | 강사 "확인" → 단계 알림 멈춤 |
 | ↑ | `resolve` | `{"event_id":17}` | 강사 "완료" → 이벤트 종료, 다음 대상 |
+| ↑ | `dismiss` | `{"event_id":17}` | 강사 "오감지" → `close_reason=false_alarm`, 다음 대상 |
+| ↑ | `pan_tilt_jog` / `preset_save` | `{dpan, dtilt}` / `{seat}` | 시설 관리 팬틸트 각도 등록 |
+| ↑ | `clip_request` | `{"event_id":17}` | 이벤트 창 '녹화 영상 다시 보기' |
+| ↓ | `clip_info` | `{event_id, status: "none"\|"recording"\|"saved"\|"deleted", started_at, ended_at, path}` | `clip_request` 응답. Console은 같은 노트북이라 `service/jarvis_DB/` + `path`를 직접 연다 |
+| ↑ | `ask` | `{"ask_id","text"}` (1~500자) | [질의] 강사 자연어 질문. vision 이 없으면 control 이 바로 `ask_answer mode=error` |
+| ↓ | `ask_answer` | 위 vision 표와 같음 | [질의] 답 + 근거 도구 목록 |
+| ↑ | `report_request` | `{"report_id"}` | [리포트] 강사 [수업 종료 리포트] (오늘 하루) |
+| ↓ | `report` | `{"report_id","status":"writing"\|"done"\|"error","data","summary","suggestions","mode","took_s","fallback"}` | [리포트] 숫자 먼저(writing) → 문장 붙여 한 번 더(done) |
+
+| ↑ | `view_request` | `{"seat": 1~4 \| null}` | [수동보기] 강사 화면 [원위치] (null) 등 |
+| ↓ | `view_state` | `{"seat","until","by"}` / `{"seat":null,"why":"timeout"\|"event"\|"request"}` | [수동보기] 시작·끝 → Console 이 카메라 보기 창을 열고 닫음 |
+
+[수동보기] 강사 "1번 좌석 보여줘" (10/22 결정):
+
+- AI 조교가 `tool_call look_at_seat {seat}` / `camera_home {}` 를 보내거나 Console 이 `view_request` 를 보내면
+  hub `camera_tool()` 이 각도 미등록만 거르고 `EventManager.on_view_request(seat, now, by)` 에 맡긴다. **판단은 event_manager.**
+- **열린 이벤트를 추적 중이면 거절** (`ok:false, reason:"tracking"`). 이벤트가 없을 때만 `pantilt preset {kind:0}`(LED 끔) + `track_target`.
+- `view_hold_s`(control.yaml timers, 60초) 뒤 tick 이 원위치(home). 그 전에 새 이벤트가 오면 `_reschedule()` 이 바로 그 이벤트로 넘긴다.
+- 이벤트가 아니므로 help_event·event_log·녹화에 남기지 않는다. 확인 단계 없이 바로 실행 (되돌리기 쉬움).
+
+[리포트] 수업 종료 리포트 (기능 3, 10/22):
+
+- 강사가 누를 때만 만든다. 범위는 오늘 하루(0시~지금). DB 에 리포트를 저장할지는 미정 (지금은 화면·PDF 만).
+- 숫자: hub 가 `AskTools.report_data()` 로 바로 집계해 Console 에 `report status=writing` 으로 먼저 보낸다.
+  문장: vision 에 `report_write {report_id, data, now}` → `report_text {summary, suggestions, mode, took_s, fallback}` 가 오면
+  `report status=done` 으로 한 번 더 보낸다. vision 이 없으면 숫자만 `done`(mode `none`).
+- `report_data`: 종류별 건수, 평균·최대 확인 시간, 평균 처리 시간, 결과별 건수, 오감지 목록, 쓰러짐 단계 알림, 좌석별 건수(키는 문자열),
+  시간대별 반 평균(class_condition), 세부 6개의 오늘 평균·가장 높았던 시간대(`condition_detail`), 장비 끊김 구간(device_log). **좌석 번호만, 반 평균만** (학생 이름·개인 값 없음).
+- 메시지 코드는 새 칸 0x6_ (`report_request` 0x60, `report` 0x61, `report_write` 0x62, `report_text` 0x63). console 0x4_ 가 다 찼다.
+
+[질의] 강사 자연어 질의 (기능 2, 10/22, 1차는 조회만):
+
+- LLM 은 vision(`ask.py`)에 있고, 데이터는 control 만 본다. LLM 이 고른 도구를 vision 이 `tool_call` 로 보내면
+  hub 가 `hub/ask_tools.py`(`AskTools.run`)로 실행해 `tool_result` 로 돌려준다. 판단 아님 → `event_manager` 를 거치지 않는다.
+- `ask_tools.py` 는 **읽기 전용**(SELECT 와 `EventManager.snapshot()`)이다. LLM 이 SQL 을 쓰지 않는다. 인자는 여기서 다시 검사.
+- **학생 이름을 내보내지 않는다** (좌석 번호로만 답하기로 결정). `seat_registration` 을 읽지 않는다.
+- 도구: `get_open_events`, `search_events(kind, seat, since, until, status, limit≤50)`, `get_event_timeline(event_id)`,
+  `get_stats(since, until)`, `get_device_status`, `get_class_condition(minutes)`. 시각은 control 지역 시간 `"YYYY-MM-DD HH:MM"`, `"today"`.
+  도구 설명은 vision `ask.py` 의 `TOOL_DECLS` 와 맞춘다.
+- 조치(확인·완료·오감지)는 2차 — "실행할까요?" 확인 단계를 붙여서.
+- 작은 모델 실수 받아 주기 (10/22): `until="today"` = 오늘 끝, `"yesterday"`/`"now"` 허용, 미래 `since` 는 고치라는 오류,
+  0건이면 `note`, 장비 상태는 `summary`·`"3분 전"`. 이름·조치 질문은 vision 이 LLM 없이 규칙으로 답한다(mode `rule`).
+- `ask_answer.fallback`: Gemini 등을 못 쓴 이유 목록 (예: `HTTP 429`). Console 에 보여 줄 수 있다.
 
 화면은 `event_update` 최신 값으로 덮어쓰기만 한다. 화면에서 상태를 계산하지 않는다.
 
@@ -231,6 +292,7 @@ control ↔ student_client_N:
 | ↓ | `fall_alert_cancel` | `{"target_seat":3}` | 누군가 확인했을 때 |
 | ↑ | `fall_confirm` | `{"target_seat":3}` | 학생 확인 버튼 |
 | ↑ | `condition_summary` | `{"focus_low":false,"posture_bad":true}` | 10초마다 |
+| ↑ | `seat_register` | `{"student_name","baseline","zones"}` | 학생 [자리 등록]. hub가 `db.register_seat` → 강사 화면에 `seat_info` |
 
 공통: `heartbeat`(2초마다, 6초 없으면 offline, 기록 안 함), `node_info`(접속 시 한 번), `rx_ack`(사건 수신 확인 — 강사 confirm과 다름).
 
@@ -244,30 +306,56 @@ control ↔ student_client_N:
 
 | 입력 | 처리 |
 | --- | --- |
-| 사건 `start` | 같은 좌석·같은 종류의 열린 이벤트가 있으면 무시. 없으면 help_event 생성 → 대기열 → `reschedule()` → `explain_request` |
+| 사건 `start` | 같은 좌석·같은 종류의 열린 이벤트가 있으면 무시(손 내림·일어남 뒤 다시 start 면 `explain_request again`). 없으면 help_event 생성 → 대기열 → `reschedule()` → `explain_request detect` |
 | `question` `end` | 닫지 않는다. `hand_down` 표시만 (자동 제거 여부는 논의 중) |
 | `away` `end` | `closed`, `close_reason=cleared`, 복귀 시각 기록 |
 | `fall` `end` | 자동으로 닫지 않는다. 강사 화면에 "일어남"만 표시 |
 | `confirm` / `fall_confirm` | `confirmed_at`, `confirmed_by` 기록. 쓰러짐이면 `fall_alert_cancel` |
 | `resolve` | `closed`, `close_reason=resolved` → `reschedule()` |
+| `dismiss` | `closed`, `close_reason=false_alarm` → `reschedule()` (그 외는 `resolve`와 같음) |
 | `track_offset` | 지금 active 좌석의 결과일 때만 `pan_tilt nudge`로 변환 |
-| 노드 offline | `device_update`. vision_service면 "감지 중단" 표시, camera_controller면 추적만 멈추고 알림은 계속 |
+| 노드 offline | `device_update`. vision_service면 "감지 중단" 표시. 팬틸트(Uno) 통신 오류는 `pan_tilt_state` SAFE → "추적 중단 (알림은 계속)" |
+
+녹화 (`to="recorder"`, hub가 `db.start_clip`/`end_clip` + `ClipRecorder`로 실행):
+
+| 때 | 할 일 |
+| --- | --- |
+| 사건 `start`로 이벤트 생성 (확정) | `recorder start {event_id, seat, kind}` → event_clip 행(status 1, path `clips/{event_id}.mp4`), event_log `clip` |
+| `_close` (resolve·dismiss·expire·cleared) | `recorder stop {event_id}` → 파일을 닫으면 status 2, `keep_until = ended_at + clip_keep_days` |
+| 재시작 `start()` | 열린 이벤트마다 `recorder start` (새 파일 `clips/{event_id}_2.mp4`). 끊긴 녹화 행은 hub가 시작할 때 status 2로 닫음 |
+| 10분마다 (hub) | `keep_until`이 지난 녹화 파일 삭제 → status 3 |
 
 tick (0.1초마다, Control 시계):
 
 1. 쓰러짐 단계 알림: 미확인 15초 → 옆자리(`seat.neighbors`) `fall_alert neighbor`, 30초 → 전체 `fall_alert all`
 2. 질문 만료: `question_expire_s` 초과 → `closed`(expired)
 3. 자리비움 미복귀: `away_alert_s` 초과 → 강사에게 재알림
+3-1. [수동보기] `view_hold_s` 가 지나면 수동 보기 끝 → 원위치
 4. `reschedule()`: 대기열 맨 앞이 지금 active와 다르면 교체(선점 포함) → `track_target` + `pan_tilt preset`. 비면 `home`
+
+[알림문구] `explain_request.situation` (강사용 알림 문구를 다시 만드는 순간, `_explain()`):
+
+| situation | 언제 | 비고 |
+| --- | --- | --- |
+| `detect` | 새 이벤트 생성 | 선점했으면 `preempted_kind/seat`, 대기면 `queue_pos` |
+| `again` | 손 내림·일어남 뒤 다시 start | |
+| `fall_neighbor` / `fall_all` | 쓰러짐 미확인 15초 / 30초 (`fall_alert` 보낼 때) | |
+| `fall_risen` | `fall` `end` (확인 전일 때만) | |
+| `hand_down` | `question` `end` | |
+| `away_overdue` | 자리비움 `away_alert_s` 초과 | |
+
+- 요청마다 이벤트의 `explain_seq`가 1씩 오르고, `explain_text`의 `seq`가 그것과 다르면(더 새 요청이 나간 뒤 늦게 온 응답) 버린다.
+- `explain_seq`, `explain_situation`은 화면 표시용이라 `event_update`에만 싣고 DB에는 없다. DB `help_event.explain_text`는 마지막 문구로 덮어쓴다.
+- 문구 생성은 vision_service(`llm.py`)가 한다. 터미널 시험: `service/jarvis_vision_service/alert_demo.py`.
 
 설정 (`config/control.yaml`, 좌석 각도는 예시값 — 박병준님 측정값으로 교체):
 
 ```yaml
 seats:
-  1: {pan: 60,  tilt: 85, neighbors: [2]}
-  2: {pan: 80,  tilt: 85, neighbors: [1, 3]}
-  3: {pan: 100, tilt: 85, neighbors: [2, 4]}
-  4: {pan: 120, tilt: 85, neighbors: [3]}
+  1: {pan: 60,  tilt: 85, neighbors: [2, 3]}   # 2×2 (1 2 / 3 4), 가로·세로 옆자리
+  2: {pan: 80,  tilt: 85, neighbors: [1, 4]}
+  3: {pan: 100, tilt: 85, neighbors: [1, 4]}
+  4: {pan: 120, tilt: 85, neighbors: [2, 3]}
 priority: {fall: 1, question: 2, away: 3}
 timers:
   fall_neighbor_s: 15
@@ -277,11 +365,17 @@ timers:
 track:
   nudge_max_hz: 10
   nudge_gain: 8.0           # 측정 후 조정
+clips:                      # 이벤트 녹화 (Data Structure v2 4장)
+  dir: service/jarvis_DB/clips   # 저장소 최상위 기준
+  fps: 10
+  keep_days: 7              # 임시 (app_setting.clip_keep_days 가 있으면 우선)
 ```
+
+실행 옵션: `--no-clips` 녹화만 끄기, `--no-video` 영상 중계를 끄면 녹화도 꺼진다.
 
 ## DB (`service/jarvis_DB/create.sql`)
 
-원본: Confluence "Data Structure" v2 (2026-10-21) 2장. 스키마는 create.sql 이 기준이고 `SCHEMA_VERSION = 3`.
+원본: Confluence "Data Structure" v2 (2026-10-21) 2장. 스키마는 create.sql 이 기준이고 `SCHEMA_VERSION = 4` (v4 = class_condition 세부 6개 컬럼 추가, 옛 hub.db 는 지우고 다시 만든다).
 
 | 테이블 | 내용 |
 | --- | --- |
@@ -291,7 +385,7 @@ track:
 | `help_event` | 도움 이벤트 (숫자 코드), reg_id = 그때 앉아 있던 학생, hand_down 저장 |
 | `event_log` | 이벤트 처리 기록, actor = 장비 번호 (0 system) |
 | `event_clip` | 이벤트 녹화 (cam2), status 1 녹화 중 · 2 저장됨 · 3 삭제됨 |
-| `class_condition` | 반 평균 (10초마다) |
+| `class_condition` | 반 평균 (10초마다) + 세부 6개 `drowsy_ratio` … `shoulder_tilt_ratio` (NULL 허용) |
 | `app_setting` | 강사 화면 [설정] (JSON 값) |
 
 - 상태값은 Interface Spec 숫자 코드: kind 1 fall · 2 question · 3 away / status 1 active · 2 waiting · 3 closed /

@@ -1,10 +1,12 @@
 # control 전용 설정 (상세 설계 6.4). control 만 읽는다.
 # 좌석 각도는 예시 값이다. 박병준님 측정값으로 바꾼다.
+# 좌석은 2×2 배치 (앞줄 1 2 / 뒷줄 3 4). neighbors = 쓰러짐 15초 알림을 받는 옆자리 (가로·세로, Data Structure v2)
+# 강사 화면 좌석도·DB seat 표도 이 값을 그대로 쓴다 (여기 한 곳만 고친다)
 seats:
-  1: {pan: 60,  tilt: 85, neighbors: [2]}
-  2: {pan: 80,  tilt: 85, neighbors: [1, 3]}
-  3: {pan: 100, tilt: 85, neighbors: [2, 4]}
-  4: {pan: 120, tilt: 85, neighbors: [3]}
+  1: {pan: 60,  tilt: 85, neighbors: [2, 3]}
+  2: {pan: 80,  tilt: 85, neighbors: [1, 4]}
+  3: {pan: 100, tilt: 85, neighbors: [1, 4]}
+  4: {pan: 120, tilt: 85, neighbors: [2, 3]}
 priority: {fall: 1, question: 2, away: 3}
 timers:
   fall_neighbor_s: 15
@@ -12,6 +14,13 @@ timers:
   question_expire_s: 180    # 임시값, 논의
   away_alert_s: 60          # 임시값, 논의
   class_condition_s: 10     # 반 집계를 강사 화면에 보내는 주기
+  view_hold_s: 60           # [수동보기] "1번 좌석 보여줘" 로 비추는 시간 (끝나면 원위치)
 track:
   nudge_max_hz: 10
   nudge_gain: 8.0           # dx 1.0 = 화면 폭 절반 → 몇 도 보정할지, 측정 후 조정 (방향이 반대면 음수로)
+condition:                  # [세부컨디션] 반 평균 세부 6개 (졸음·하품·전방 주시 / 앞으로 숙임·고개 기울임·어깨 비대칭)
+  detail_min_students: 1    # 그 항목을 보낸 학생이 이보다 적으면 null 로 보냄·저장 (테스트 중 1, 운영은 3 권장)
+clips:                      # 이벤트 녹화 (Data Structure v2 4장) - 팬틸트 cam2 영상만, 이벤트 확정~종료
+  dir: service/jarvis_DB/clips   # 저장소 최상위 기준. DB event_clip.path 에는 "clips/{event_id}.mp4" 로 들어간다
+  fps: 10
+  keep_days: 7              # 임시 (강사 화면 [설정] app_setting.clip_keep_days 가 있으면 우선)

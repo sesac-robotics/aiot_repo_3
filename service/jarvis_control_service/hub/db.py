@@ -10,7 +10,7 @@ WAL 모드로 열어, 다른 프로그램(DB 뷰어)이 읽는 동안에도 기�
 - help_event        : 도움 이벤트 (event_manager 가 정한 상태)
 - event_log         : 이벤트별 처리 기록
 - event_clip        : 이벤트 녹화 (팬틸트 cam2)
-- class_condition   : 반 평균 (10초마다)
+- class_condition   : 반 평균 (10초마다) + 세부 6개 비율 (drowsy_ratio ...)
 - app_setting       : 강사 화면 [설정]
 
 DB 에는 Interface Spec 의 숫자 코드로 저장한다. event_manager 는 지금처럼 문자열
@@ -25,9 +25,11 @@ import json
 import sqlite3
 from pathlib import Path
 
+from common.protocol import CONDITION_DETAIL_KEYS
 from hub.control_config import CREATE_SQL
 
-SCHEMA_VERSION = 3          # 1 = cameras/seats, 2 = nodes/messages/node_status, 3 = Data Structure v2
+SCHEMA_VERSION = 4          # 1 = cameras/seats, 2 = nodes/messages/node_status, 3 = Data Structure v2,
+                            # 4 = class_condition 세부 6개 (drowsy_ratio ...)
 
 # ---- Interface Spec 숫자 코드 ----------------------------------------------
 KIND = {"fall": 1, "question": 2, "away": 3}
@@ -366,6 +368,21 @@ class Database:
                 (ts, CLIP_SAVED, ts + keep_days * DAY_S, CLIP_RECORDING))
         return cur.rowcount
 
+    def discard_clip(self, clip_id: int, ts: float):
+        """프레임을 한 장도 못 쓴 녹화 (cam2 영상 없음). 파일은 없고 삭제됨(3)으로 남긴다."""
+        with self.conn:
+            self.conn.execute("UPDATE event_clip SET ended_at=?, status=? WHERE clip_id=?",
+                              (ts, CLIP_DELETED, clip_id))
+
+    def latest_clip(self, event_id: int) -> dict | None:
+        """이벤트 창 다시 보기 (clip_request): 녹화 중인 것 > 마지막 저장본 > 마지막 행 순서."""
+        rows = self.clips_for_event(event_id)
+        for st in (CLIP_RECORDING, CLIP_SAVED):
+            hit = [r for r in rows if r["status"] == st]
+            if hit:
+                return hit[-1]
+        return rows[-1] if rows else None
+
     def expired_clips(self, now: float) -> list[dict]:
         """보관 기간이 지난 클립 (파일 삭제 대상)."""
         rows = self.conn.execute(
@@ -387,11 +404,16 @@ class Database:
     # 반 평균 · 설정
     # =====================================================================
     def insert_class_condition(self, ts: float, focus_low_ratio: float,
-                               posture_bad_ratio: float, n: int):
+                               posture_bad_ratio: float, n: int, detail: dict | None = None):
+        """detail = {drowsy: 0.25 | None, ...} (CONDITION_DETAIL_KEYS). 없는 키는 NULL."""
+        detail = detail or {}
+        cols = [f"{k}_ratio" for k in CONDITION_DETAIL_KEYS]
+        vals = [detail.get(k) for k in CONDITION_DETAIL_KEYS]
         with self.conn:
             self.conn.execute(
-                "INSERT INTO class_condition (ts, focus_low_ratio, posture_bad_ratio, n)"
-                " VALUES (?,?,?,?)", (ts, focus_low_ratio, posture_bad_ratio, n))
+                "INSERT INTO class_condition (ts, focus_low_ratio, posture_bad_ratio, n, "
+                + ", ".join(cols) + ") VALUES (?,?,?,?" + ",?" * len(cols) + ")",
+                (ts, focus_low_ratio, posture_bad_ratio, n, *vals))
 
     def get_setting(self, key: str, default=None):
         """app_setting 값 (JSON 으로 저장). 없으면 default."""

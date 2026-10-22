@@ -8,6 +8,8 @@ monitor.monitor_main 옵션(--source, --posture-hold, --img-every ...)도 그대
 판정 구성은 monitor와 같다 (얼굴 v2 + 근거 보정, 자세 v6). 단 자세 확정 시간만 실사용 값 30초가 기본이다.
 
 흐름: 시작 → 이 좌석 등록값이 없으면 [자리 등록] 창부터 → 평소 화면. 자리 등록은 student_gui/registration.py.
+등록값(이름·바른 자세·영역)은 학생 노트북 data/seats/에 저장하고, seat_register로 Control(중앙 DB)에도 보낸다
+(강사 화면에 학생 이름이 뜬다).
 """
 import logging
 import sys

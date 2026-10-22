@@ -12,7 +12,7 @@ from common import protocol as P
 
 from . import theme as T
 from .home import card
-from .store import LAYOUT_NEIGHBORS, SEATS, Store, settings
+from .store import SEATS, Store, settings
 from .video import LiveVideo, UdpFrameSource
 
 DEVICE_ORDER = [P.CONTROL_NODE, P.VISION_NODE, T.PANTILT_NODE, P.CONSOLE_NODE, *P.STUDENT_NODES]
@@ -54,12 +54,12 @@ class FacilityPage(QWidget):
             grid.addWidget(QLabel(h, objectName="muted"), 0, c)
         self.seat_rows = {}
         for r, s in enumerate(SEATS, start=1):
-            name = QLabel()
+            nb, name = QLabel(), QLabel()
             grid.addWidget(QLabel(f"{s}번"), r, 0)
-            grid.addWidget(QLabel(", ".join(f"{n}번" for n in LAYOUT_NEIGHBORS[s])), r, 1)
+            grid.addWidget(nb, r, 1)
             grid.addWidget(QLabel(P.student_node(s)), r, 2)
             grid.addWidget(name, r, 3)
-            self.seat_rows[s] = name
+            self.seat_rows[s] = (nb, name)
         grid.setColumnStretch(2, 1)
         l2.addLayout(grid)
         left.addWidget(f2)
@@ -132,7 +132,8 @@ class FacilityPage(QWidget):
                 self.dev_table.setItem(r, c, it)
 
     def refresh_seats(self):
-        for s, name in self.seat_rows.items():
+        for s, (nb, name) in self.seat_rows.items():
+            nb.setText(", ".join(f"{n}번" for n in self.store.seats[s]["neighbors"]) or "—")
             name.setText(self.store.student_name(s) or "미등록")
         done = []
         for s in SEATS:

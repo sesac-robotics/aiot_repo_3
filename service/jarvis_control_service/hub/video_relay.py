@@ -4,8 +4,11 @@
 - 카메라마다 UDP 포트 하나에서 받는다 (protocol.VIDEO_PORTS: cam1 6001, cam2 6002)
 - 데이터그램 하나 = 헤더 16바이트 + JPEG 한 장 (protocol.VIDEO_HEADER). 헤더·JPEG 시작이 틀리면 버린다.
 - 받은 데이터그램은 바꾸지 않고, 지금 접속 중인 instructor_console 의 IP 로 그대로 보낸다
-  (protocol.CONSOLE_VIDEO_PORTS: cam1 5011, cam2 5012). Vision에는 별도로 5021/5022로 보낸다.
-- 저장하지 않는다 (디스크·DB 모두). 디코딩도 하지 않는다.
+  (protocol.CONSOLE_VIDEO_PORTS: cam1 5011, cam2 5012). Console 이 없으면 버린다.
+  Vision에는 별도로 5021/5022로 보낸다 (protocol.VISION_VIDEO_PORTS).
+- 중계 자체는 저장하지 않는다 (디스크·DB 모두). 디코딩도 하지 않는다.
+  [녹화] on_frame(cam, jpeg, rx_ts) 를 주면 형식이 맞는 프레임마다 넘긴다 (hub 가 cam2 를 ClipRecorder 로).
+  콜백은 큐에 넣기만 해야 한다 (이 루프를 막지 않게).
 - 판단은 하지 않는다. 카메라별 수신 시작·끊김(3초)만 로그로 남긴다.
 """
 
@@ -51,8 +54,11 @@ class _CamProtocol(asyncio.DatagramProtocol):
 
 class VideoRelay:
     def __init__(self, host: str, console_ip, ports: dict | None = None,
-                 console_ports: dict | None = None, vision_ip=None):
-        """console_ip() = 지금 접속 중인 instructor_console 의 IP (없으면 None)."""
+                 console_ports: dict | None = None, vision_ip=None, on_frame=None):
+        """console_ip() = 지금 접속 중인 instructor_console 의 IP (없으면 None).
+        vision_ip() = Vision 노드 IP (없으면 None).
+        on_frame(cam, jpeg, rx_ts) = 받은 프레임마다 (녹화용, 없으면 None)."""
+        self.on_frame = on_frame
         self.host = host
         self.vision_ip = vision_ip or (lambda: None)
         self.console_ip = console_ip
@@ -100,6 +106,11 @@ class VideoRelay:
         if not st.live:
             st.live = True
             log.info("cam%d 영상 수신 시작 (%s)", proto.cam, st.peer)
+        if self.on_frame is not None:
+            try:
+                self.on_frame(proto.cam, data[hs:], now)
+            except Exception:                  # 녹화 오류로 중계가 멈추지 않게
+                log.exception("cam%d 프레임 콜백 오류", proto.cam)
 
         vision_ip = self.vision_ip()
         if vision_ip:
