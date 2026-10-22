@@ -100,12 +100,20 @@ CREATE TABLE IF NOT EXISTS device_log (
 );
 
 -- 반 평균 (10초마다, 개인 값 없음)
+-- 세부 6개 = 10초 동안 한 번이라도 감지된 학생 비율. 그 항목을 보낸 학생이
+-- control.yaml condition.detail_min_students 보다 적으면 NULL.
 CREATE TABLE IF NOT EXISTS class_condition (
-  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts                 REAL NOT NULL,
-  focus_low_ratio    REAL NOT NULL,
-  posture_bad_ratio  REAL NOT NULL,
-  n                  INTEGER NOT NULL
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                   REAL NOT NULL,
+  focus_low_ratio      REAL NOT NULL,
+  posture_bad_ratio    REAL NOT NULL,
+  n                    INTEGER NOT NULL,
+  drowsy_ratio         REAL,            -- 졸음
+  yawn_ratio           REAL,            -- 하품
+  not_forward_ratio    REAL,            -- 전방 주시 미흡
+  forward_lean_ratio   REAL,            -- 앞으로 숙임
+  head_tilt_ratio      REAL,            -- 고개 기울임
+  shoulder_tilt_ratio  REAL             -- 어깨 비대칭
 );
 
 -- 강사 화면 [설정] (화면에서 바꾸는 값만. 나머지는 control.yaml)

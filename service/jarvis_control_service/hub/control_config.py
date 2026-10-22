@@ -41,6 +41,9 @@ CONTROL_DEFAULTS = {
         "view_hold_s": 60,         # [수동보기] 강사가 고른 좌석을 비추는 시간
     },
     "track": {"nudge_max_hz": 10, "nudge_gain": 8.0},
+    "condition": {                 # [세부컨디션] 반 평균 세부 6개 (졸음·하품·전방 주시 / 숙임·고개·어깨)
+        "detail_min_students": 1,  # 그 항목을 보낸 학생이 이보다 적으면 비율을 null 로 (테스트 중 1, 운영 3 권장)
+    },
     "clips": {                     # 이벤트 녹화 (Data Structure v2 4장)
         "dir": "service/jarvis_DB/clips",   # 저장소 최상위 기준 (절대 경로도 됨)
         "fps": 10,

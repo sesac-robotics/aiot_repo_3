@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDateEdit,
 
 from common import protocol as P
 
+from . import condition_view as CV               # [세부컨디션] 반 평균 세부 6개
 from . import theme as T
 from .assistant import AssistantPanel                # [질의] ⑤ AI 조교에게 묻기
 from .camera_view import CameraViewPanel             # [수동보기] "1번 좌석 보여줘"
@@ -560,25 +561,38 @@ class LogPanel(QWidget):
 
 # ── 3. 통계 ────────────────────────────────────────────────
 class StatsPanel(QWidget):
+    """③ 반 통계 (반 평균만). 기본은 묶음 2개 막대, [세부 보기] 를 누르면 세부 6개 + 30분 추이 (10/22 시안)."""
+
     def __init__(self, store: Store, logs: LogQueries):
         super().__init__()
         self.store, self.logs = store, logs
-        f, lay = card("반 통계")
+        f, lay = card()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(f)
+        head = QHBoxLayout()
+        head.addWidget(QLabel("반 통계 (반 평균만)", objectName="cardTitle"))
+        self.n = QLabel("학생 —명 · 최근 10초", objectName="muted")
+        head.addWidget(self.n)
+        head.addStretch(1)
+        self.b_detail = QPushButton("세부 보기 ▾", checkable=True, objectName="detailToggle")   # [세부컨디션]
+        self.b_detail.toggled.connect(self.on_toggle)
+        head.addWidget(self.b_detail)
+        lay.addLayout(head)
+
         row = QHBoxLayout()
-        self.tiles = {}
-        for key, label in [("focus", "집중 낮은 학생 비율"), ("posture", "자세 불량 비율"), ("today", "오늘 도움 요청")]:
-            box = QVBoxLayout()
-            v = QLabel("—"); v.setStyleSheet("font-size:24px; font-weight:700;")
-            box.addWidget(v); box.addWidget(QLabel(label, objectName="muted"))
-            row.addLayout(box); row.addSpacing(18)
-            self.tiles[key] = v
-        row.addStretch(1)
+        row.setSpacing(24)
+        self.meters = {g: CV.Meter(CV.GROUP_NAME[g], CV.GROUP_COLOR[g], big=True) for g in ("focus", "posture")}
+        for m in self.meters.values():
+            row.addWidget(m, 1)
         lay.addLayout(row)
-        self.n = QLabel("반 평균만 표시 · 개인 값 없음", objectName="muted")
-        lay.addWidget(self.n)
+
+        self.detail = CV.ConditionDetail()                 # 기본 접힘
+        self.detail.hide()
+        lay.addWidget(self.detail)
+
+        self.today = QLabel("오늘: —", objectName="muted")
+        lay.addWidget(self.today)
         self.rest = QLabel(objectName="banner", wordWrap=True)
         self.rest.hide()
         lay.addWidget(self.rest)
@@ -587,16 +601,28 @@ class StatsPanel(QWidget):
         store.condition_changed.connect(self.refresh)
         store.rest_suggested.connect(self.on_rest)
 
+    def on_toggle(self, on: bool):
+        self.b_detail.setText("세부 접기 ▴" if on else "세부 보기 ▾")
+        self.detail.setVisible(on)
+        if on:
+            self.refresh()
+
     def refresh(self):
         c = self.store.condition
-        if c:
-            self.tiles["focus"].setText(f"{c['focus_low_ratio'] * 100:.0f}%")
-            self.tiles["posture"].setText(f"{c['posture_bad_ratio'] * 100:.0f}%")
-            n = c.get("n", c.get("reporting", 0))     # v1.1 'n' / 현재 hub 'reporting'
-            self.n.setText(f"최근 10초 · 학생 {n}명 반 평균 · 개인 값 없음")
+        if not c:
+            return
+        self.meters["focus"].set_value(c.get("focus_low_ratio"))
+        self.meters["posture"].set_value(c.get("posture_bad_ratio"))
+        n = c.get("n", c.get("reporting", 0))     # v1.1 'n' / 현재 hub 'reporting'
+        small = 0 < n < CV.SMALL_CLASS
+        self.n.setText(f"학생 {n}명 · 최근 10초")
+        self.n.setObjectName("smallN" if small else "muted")
+        self.n.style().unpolish(self.n); self.n.style().polish(self.n)
+        if self.b_detail.isChecked():                    # 접혀 있으면 그리지 않음
+            self.detail.refresh(c, self.store.condition_history)
 
     def refresh_today(self):
-        self.logs.query(lambda m: self.tiles["today"].setText(f"{m['total']}건"), t_from=today_start())
+        self.logs.query(lambda m: self.today.setText(f"오늘 도움 요청 {m['total']}건"), t_from=today_start())
 
     def on_rest(self, ratio: float, since: float):
         mins = max(1, int((time.time() - since) // 60))

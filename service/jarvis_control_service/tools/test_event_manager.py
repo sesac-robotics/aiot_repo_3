@@ -1,7 +1,8 @@
 """
 event_manager 단위 테스트 (상세 설계 9장 "단위"): 가짜 시계로 사건을 순서대로 넣는다.
 확인: 선점, FIFO, 15초/30초 알림, 만료, 중복 무시, confirm/resolve, 팬틸트 연동(preset/home/track, gen),
-      녹화 구간(확정 ~ 종료), [수동보기] 좌석 보기, [알림문구] 상황별 explain_request·늦은 응답 거르기
+      녹화 구간(확정 ~ 종료), [수동보기] 좌석 보기, [알림문구] 상황별 explain_request·늦은 응답 거르기,
+      [세부컨디션] 반 평균 세부 6개 비율·최소 학생 수
 
 실행 (service/jarvis_control_service 폴더에서):  python3 -m unittest tools.test_event_manager -v
 """
@@ -235,8 +236,47 @@ class EventManagerTest(unittest.TestCase):
         self.m.on_condition_summary(3, {"focus_low": False, "posture_bad": True}, T0 + 3)
         self.m.on_condition_summary(4, {"focus_low": False, "posture_bad": False}, T0 + 4)
         fx = self.m.tick(T0 + 10)
-        self.assertEqual(sends(fx, "class_condition")[0].value,
+        v = sends(fx, "class_condition")[0].value
+        self.assertEqual({k: v[k] for k in ("focus_low_ratio", "posture_bad_ratio", "reporting")},
                          {"focus_low_ratio": 0.25, "posture_bad_ratio": 0.5, "reporting": 4})
+        self.assertTrue(all(x is None for x in v["detail"].values()))   # 옛 클라이언트: 세부 키 없음 → null
+
+    # ---- [세부컨디션] ----------------------------------------------------
+    def detail_summary(self, seat, t, **on):
+        keys = ("drowsy", "yawn", "not_forward", "forward_lean", "head_tilt", "shoulder_tilt")
+        v = {k: bool(on.get(k)) for k in keys}
+        v["focus_low"] = v["drowsy"] or v["yawn"] or v["not_forward"]
+        v["posture_bad"] = v["forward_lean"] or v["head_tilt"] or v["shoulder_tilt"]
+        self.m.on_condition_summary(seat, v, T0 + t)
+
+    def test_class_condition_detail_ratio(self):
+        self.m.tick(T0)
+        self.detail_summary(1, 1, drowsy=True, yawn=True)
+        self.detail_summary(2, 2, drowsy=True)
+        self.detail_summary(3, 3, forward_lean=True)
+        self.m.on_condition_summary(4, {"focus_low": False, "posture_bad": False}, T0 + 4)  # 옛 클라이언트
+        d = sends(self.m.tick(T0 + 10), "class_condition")[0].value["detail"]
+        # 분모 = 세부 키를 보낸 3명 (4번 좌석 제외)
+        self.assertEqual(d, {"drowsy": 0.67, "yawn": 0.33, "not_forward": 0.0,
+                             "forward_lean": 0.33, "head_tilt": 0.0, "shoulder_tilt": 0.0})
+
+    def test_class_condition_detail_min_students(self):
+        cfg = copy.deepcopy(CONTROL_DEFAULTS)
+        cfg["condition"]["detail_min_students"] = 3
+        self.m = EventManager(cfg)
+        self.m.tick(T0)
+        self.detail_summary(1, 1, drowsy=True)
+        self.detail_summary(2, 2)
+        v = sends(self.m.tick(T0 + 10), "class_condition")[0].value
+        self.assertEqual(v["reporting"], 2)
+        self.assertTrue(all(x is None for x in v["detail"].values()))   # 2명 < 3명 → null
+        self.assertEqual(v["focus_low_ratio"], 0.5)                      # 묶음은 그대로
+
+    def test_class_condition_detail_one_student(self):                   # 기본값 1명 (테스트 중)
+        self.m.tick(T0)
+        self.detail_summary(1, 1, drowsy=True)
+        d = sends(self.m.tick(T0 + 10), "class_condition")[0].value["detail"]
+        self.assertEqual((d["drowsy"], d["yawn"]), (1.0, 0.0))
 
     # ---- 재시작 복구 ----------------------------------------------------
     def test_restore_open_events(self):

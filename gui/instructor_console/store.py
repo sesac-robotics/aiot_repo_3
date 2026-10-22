@@ -5,10 +5,14 @@
 
 Control(hub)이 Console 에 보내는 것 (common/protocol.py CONSOLE_TYPES):
   snapshot {events, queue, devices, seats} · event_update · queue_state · device_update · class_condition
+  (class_condition 은 최근 1시간을 condition_history 에 쌓는다 → [세부 보기] 30분 추이)
   · preset_saved · seat_info (자리 등록 / 좌석 정보)
 옆자리는 Control 의 control.yaml 이 기준이다 (화면에 따로 적어 두지 않는다).
 """
 from __future__ import annotations
+
+import time
+from collections import deque
 
 from PyQt6.QtCore import QObject, QSettings, pyqtSignal
 
@@ -38,6 +42,7 @@ class Store(QObject):
         self.queue = {"active": None, "waiting": []}
         self.devices: dict[str, dict] = {}       # 노드 이름 → device_update
         self.condition: dict | None = None
+        self.condition_history: deque = deque(maxlen=360)   # [세부컨디션] (받은 시각, class_condition) 최근 1시간
         self.in_snapshot = False
 
     @staticmethod
@@ -80,6 +85,7 @@ class Store(QObject):
             self.devices_changed.emit()
         elif name == "class_condition":
             self.condition = m
+            self.condition_history.append((time.time(), m))
             self.condition_changed.emit()
         elif name == "seat_info":                # 학생 [자리 등록] 등 좌석 정보가 바뀜
             self._set_seat(m)

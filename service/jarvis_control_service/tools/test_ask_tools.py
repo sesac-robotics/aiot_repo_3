@@ -136,11 +136,26 @@ class AskToolsTest(unittest.TestCase):
         r = self.run_tool("get_class_condition", minutes=30)
         self.assertEqual(r["samples"], 6)
         self.assertEqual(r["latest"]["reporting"], 4)
+        self.assertIsNone(r["detail"])                                     # 세부 기록 없음
+
+    def test_class_condition_detail(self):                                  # [세부컨디션]
+        for i in range(4):
+            self.db.insert_class_condition(self.now - 300 + i * 60, 0.5, 0.25, 2,
+                                           {"drowsy": 0.5, "yawn": 0.25 * (i % 2), "not_forward": 0.0,
+                                            "forward_lean": 0.25, "head_tilt": None, "shoulder_tilt": 0.0})
+        r = self.run_tool("get_class_condition", minutes=30)
+        self.assertEqual(r["detail"]["avg"]["drowsy"], 0.5)
+        self.assertEqual(r["detail"]["avg"]["yawn"], 0.12)
+        self.assertIsNone(r["detail"]["avg"]["head_tilt"])
+        self.assertEqual(r["detail"]["top_focus_item"], "졸음")
+        self.assertEqual(r["detail"]["top_posture_item"], "앞으로 숙임")
+        self.assertIn("2명뿐", r["note"])                                   # 보고 학생 3명 미만 안내
 
 
     # ---- [리포트] ----
     def test_report_data_today_only_seat_numbers(self):
         self.db.insert_class_condition(TODAY_10 + 60, 0.25, 0.5, 4)
+        self.db.insert_class_condition(TODAY_10 + 3000, 0.5, 0.5, 4, {"drowsy": 0.5, "forward_lean": 0.25})
         self.db.reset_devices(TODAY_10)
         self.db.set_device_online("student_client_1", False, TODAY_10 + 300, "1번 좌석 알림 못 받음")
         self.db.set_device_online("student_client_1", True, TODAY_10 + 480)
@@ -154,6 +169,9 @@ class AskToolsTest(unittest.TestCase):
         self.assertEqual(r["by_seat"]["3"]["fall"], 1)
         self.assertEqual(r["hourly_condition"][0]["hour"], 10)
         self.assertEqual(r["device_outages"][0]["duration"], "3분 0초")
+        cd = r["condition_detail"]                                           # [세부컨디션]
+        self.assertEqual((cd["drowsy"]["name"], cd["drowsy"]["avg"], cd["drowsy"]["peak_hour"]), ("졸음", 0.5, 10))
+        self.assertIsNone(cd["yawn"]["avg"])
         self.assertTrue(all(isinstance(k, str) for k in r["by_seat"]))      # TLV 로 보낼 수 있게 문자열 키
 
 

@@ -14,13 +14,14 @@ vision_service 의 LLM 이 tool_call {name, args} 를 보내면 hub 가 AskTools
     get_event_timeline(event_id)                               이벤트 한 건의 처리 과정 (event_log)
     get_stats(since, until)                                    종류·결과·좌석별 건수, 확인·처리 시간
     get_device_status()                                        장비 연결 상태 (device)
-    get_class_condition(minutes)                               반 평균 집중·자세 (class_condition, 개인 없음)
+    get_class_condition(minutes)                               반 평균 집중·자세 + 세부 6개 (class_condition, 개인 없음)
 """
 
 import logging
 import time
 from datetime import datetime
 
+from common.protocol import CONDITION_DETAIL_GROUP, CONDITION_DETAIL_KEYS, CONDITION_DETAIL_KO
 from hub.db import ALERT_STAGE, CLOSE_REASON, KIND, STATUS, node_name
 
 log = logging.getLogger("ask_tools")
@@ -31,6 +32,13 @@ _CLOSE_R = {v: k for k, v in CLOSE_REASON.items()}
 _ALERT_R = {v: k for k, v in ALERT_STAGE.items()}
 
 MAX_LIMIT = 50
+SMALL_CLASS = 3          # [세부컨디션] 보고 학생이 이보다 적으면 "반 평균 ≈ 그 학생 값" 이라고 알린다
+DETAIL_COLS = ", ".join(f"{k}_ratio" for k in CONDITION_DETAIL_KEYS)
+DETAIL_NOTE = ("세부 항목(detail)은 최근 10초 동안 한 번이라도 감지된 학생 비율(0~1)의 반 평균. "
+               "null = 그 항목을 보낸 학생이 적어 값 없음. 이름: " +
+               ", ".join(f"{k}={v}" for k, v in CONDITION_DETAIL_KO.items()) +
+               ". 집중 저하(focus_low)의 세부는 졸음·하품·전방 주시 미흡, 자세 불량(posture_bad)의 세부는 "
+               "앞으로 숙임·고개 기울임·어깨 비대칭. 누가 그런지는 알 수 없다")
 STATUS_FILTERS = ("open", "closed", "unconfirmed", "resolved", "false_alarm", "expired", "cleared")
 
 
@@ -116,6 +124,49 @@ def _kind(value) -> str | None:
 
 def _round(x, nd=1):
     return round(x, nd) if x is not None else None
+
+
+def _avg(xs):
+    xs = [x for x in xs if x is not None]
+    return _round(sum(xs) / len(xs), 2) if xs else None
+
+
+def _top(d: dict, group: str):
+    """묶음 안에서 가장 높은 세부 항목 (한글 이름). 값이 없거나 전부 0 이면 None."""
+    vals = [(d.get(k), k) for k in CONDITION_DETAIL_GROUP[group] if d.get(k) is not None]
+    if not vals or max(vals)[0] <= 0:
+        return None
+    return CONDITION_DETAIL_KO[max(vals)[1]]
+
+
+def _detail_summary(rows) -> dict:
+    """[세부컨디션] class_condition 행들 → 마지막 값·기간 평균·묶음별 1위 (한글)."""
+    latest = {k: rows[-1][f"{k}_ratio"] for k in CONDITION_DETAIL_KEYS}
+    avg = {k: _avg([r[f"{k}_ratio"] for r in rows]) for k in CONDITION_DETAIL_KEYS}
+    if all(v is None for v in avg.values()):
+        return {"detail": None, "detail_note": "세부 항목 기록 없음 (학생 프로그램이 묶음 2개만 보냄)"}
+    return {"detail": {"latest": latest, "avg": avg,
+                       "top_focus_item": _top(avg, "focus"), "top_posture_item": _top(avg, "posture")}}
+
+
+def _detail_by_hour(conn, start: float, now: float) -> dict | None:
+    """[세부컨디션] 오늘 세부 6개: {key: {name, group, avg, peak_hour, peak}}. 기록이 없으면 None."""
+    sel = ", ".join(f"avg({k}_ratio) AS {k}" for k in CONDITION_DETAIL_KEYS)
+    rows = conn.execute(
+        "SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS h, " + sel +
+        " FROM class_condition WHERE ts >= ? AND ts <= ? GROUP BY h ORDER BY h", (start, now)).fetchall()
+    total = conn.execute("SELECT " + sel + " FROM class_condition WHERE ts >= ? AND ts <= ?",
+                         (start, now)).fetchone()
+    if total is None or all(total[k] is None for k in CONDITION_DETAIL_KEYS):
+        return None
+    out = {}
+    for group, keys in CONDITION_DETAIL_GROUP.items():
+        for k in keys:
+            hours = [(r[k], r["h"]) for r in rows if r[k] is not None]
+            peak = max(hours) if hours else (None, None)
+            out[k] = {"name": CONDITION_DETAIL_KO[k], "group": group, "avg": _round(total[k], 2),
+                      "peak": _round(peak[0], 2), "peak_hour": peak[1]}
+    return out
 
 
 class AskTools:
@@ -303,8 +354,8 @@ class AskTools:
             raise ToolError("minutes 는 1~240 숫자") from None
         now = self.clock()
         rows = self.db.conn.execute(
-            "SELECT ts, focus_low_ratio, posture_bad_ratio, n FROM class_condition WHERE ts >= ? ORDER BY ts",
-            (now - minutes * 60,)).fetchall()
+            "SELECT ts, focus_low_ratio, posture_bad_ratio, n, " + DETAIL_COLS +
+            " FROM class_condition WHERE ts >= ? ORDER BY ts", (now - minutes * 60,)).fetchall()
         if not rows:
             return {"minutes": minutes, "samples": 0,
                     "note": "이 기간에 반 집계가 없음 (학생 노트북이 보고하지 않았거나 수업 전)"}
@@ -317,7 +368,10 @@ class AskTools:
             "avg": {"focus_low_ratio": _round(sum(f) / len(f), 2), "posture_bad_ratio": _round(sum(p) / len(p), 2)},
             "first_half_avg_focus_low": _round(sum(f[:half]) / half, 2),
             "second_half_avg_focus_low": _round(sum(f[half:]) / max(1, len(f) - half), 2),
-            "note": "비율은 반 전체 중 해당 학생 비율(0~1). 개인별 값은 없음",
+            **_detail_summary(rows),                                       # [세부컨디션]
+            "note": "비율은 반 전체 중 해당 학생 비율(0~1). 개인별 값은 없음. " + DETAIL_NOTE
+                    + (f". 지금 보고 학생이 {rows[-1]['n']}명뿐이라 반 평균이 곧 그 학생들의 값에 가깝다"
+                       if rows[-1]["n"] < SMALL_CLASS else ""),
         }
 
     # ------------------------------------------------------------------ [리포트] 수업 종료 리포트 숫자
@@ -352,6 +406,8 @@ class AskTools:
             hourly.append({"hour": r["h"], "focus_low": _round(r["f"], 2), "posture_bad": _round(r["p"], 2),
                            "samples": r["n"]})
 
+        detail_today = _detail_by_hour(self.db.conn, start, now)           # [세부컨디션]
+
         names = {d["node"]: d["name"] for d in self.db.devices()}
         outages, down = [], {}                               # 오늘 끊긴 구간 (device_log)
         for r in self.db.conn.execute("SELECT node, ts, online, note FROM device_log WHERE ts >= ? ORDER BY ts",
@@ -382,6 +438,7 @@ class AskTools:
             "fall_alerts": [{"seat": e["seat"], "stage": e["alert_stage"], "at": e["detected_at"][11:16]}
                             for e in rows if e["kind"] == "fall" and e["alert_stage"] != "none"],
             "unconfirmed_open": sum(1 for e in rows if e["status"] != "closed" and not e["confirmed_at"]),
-            "by_seat": by_seat, "hourly_condition": hourly, "device_outages": outages,
+            "by_seat": by_seat, "hourly_condition": hourly, "condition_detail": detail_today,
+            "device_outages": outages,
             "note": "좌석 번호만, 반 평균만. 학생 이름·개인 집중·자세 값 없음",
         }

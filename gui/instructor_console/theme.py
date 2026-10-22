@@ -75,6 +75,10 @@ QMainWindow, #page { background: #f4f5f7; }
 #sideBar QToolButton:checked { background: #37474f; color: #ffffff; font-weight: 600; }
 #sideBar QToolButton:hover { background: #31424a; }
 #banner { background: #fff4e5; border: 1px solid #f9ab00; border-radius: 8px; padding: 6px 10px; }
+#smallN { color: #8a4b00; background: #fff4e5; border: 1px solid #f9ab00; border-radius: 9px; padding: 0 7px;
+          font-weight: 700; font-size: 12px; }
+#detailToggle { border-radius: 14px; padding: 4px 12px; color: #37474f; }
+#detailToggle:checked { background: #eef1f4; border: 1.5px solid #37474f; font-weight: 700; }
 #offlineBanner { background: #fdecea; border: 1px solid #d93025; border-radius: 8px; padding: 6px 10px; color: #b3261e; }
 QPushButton { padding: 6px 12px; border-radius: 6px; border: 1px solid #c4c8cc; background: #fff; }
 QPushButton:hover { background: #f1f3f4; }

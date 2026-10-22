@@ -25,7 +25,7 @@ confirm 은 상태가 아니다. confirmed_at 을 기록하고 단계 알림만 
 import logging
 from dataclasses import asdict, dataclass, field
 
-from common.protocol import (CONSOLE_NODE, STUDENT_NODES, VISION_NODE,   # [팬틸트] CAMERA_NODE 제거
+from common.protocol import (CONDITION_DETAIL_KEYS, CONSOLE_NODE, STUDENT_NODES, VISION_NODE,   # [팬틸트] CAMERA_NODE 제거
                              student_node)
 
 log = logging.getLogger("event_manager")
@@ -116,6 +116,8 @@ class EventManager:
         self.away_alert_s = float(t["away_alert_s"])
         self.class_condition_s = float(t.get("class_condition_s", 10))
         self.view_hold_s = float(t.get("view_hold_s", 60))     # [수동보기] 강사가 고른 좌석을 비추는 시간
+        # [세부컨디션] 세부 항목 비율을 낼 최소 학생 수 (그 항목을 보낸 학생 기준)
+        self.detail_min_students = int(cfg.get("condition", {}).get("detail_min_students", 1))
         # [팬틸트] nudge_min_interval, nudge_gain 삭제 — P 제어(보정량 계산)는 팬틸트 모듈이 한다
 
         self.next_id = next_event_id
@@ -522,10 +524,17 @@ class EventManager:
         if not fresh:
             return
         n = len(fresh)
+        # [세부컨디션] 항목마다 그 키를 보낸 학생만 분모로 센다 (옛 클라이언트는 묶음 2개만 보냄)
+        detail = {}
+        for k in CONDITION_DETAIL_KEYS:
+            have = [v[k] for v in fresh if isinstance(v.get(k), bool)]
+            detail[k] = (round(sum(have) / len(have), 2)
+                         if have and len(have) >= self.detail_min_students else None)
         self._send(CONSOLE_NODE, "class_condition", {
             "focus_low_ratio": round(sum(bool(v.get("focus_low")) for v in fresh) / n, 2),
             "posture_bad_ratio": round(sum(bool(v.get("posture_bad")) for v in fresh) / n, 2),
-            "reporting": n})
+            "reporting": n,
+            "detail": detail})
 
     # ---- 할 일 쌓기 -----------------------------------------------------
     def _send(self, to: str, type_: str, value: dict, seat=None):
