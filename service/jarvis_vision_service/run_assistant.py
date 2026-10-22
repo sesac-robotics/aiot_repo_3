@@ -23,6 +23,8 @@ from pathlib import Path
 
 # common/ 은 저장소 최상위(aiot_repo_3/)에 있다
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# AI 조교(LLM) 모듈은 llm/ 폴더에 있다 (llm.py, ask.py, report.py, assistant_config.py, config/assistant.yaml)
+sys.path.insert(0, str(Path(__file__).resolve().parent / "llm"))
 
 from common.config import load_config          # noqa: E402
 from common.node_client import NodeClient      # noqa: E402

@@ -13,13 +13,16 @@ import os
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent                 # service/jarvis_vision_service/
-sys.path.insert(0, str(HERE.parents[1]))               # aiot_repo_3/ (common/)
+HERE = Path(__file__).resolve().parent                 # service/jarvis_vision_service/llm/
+# 저장소 최상위(aiot_repo_3/, common/ 이 있는 곳)를 위로 올라가며 찾는다 → 폴더를 옮겨도 동작
+REPO_ROOT = next(p for p in HERE.parents if (p / "common" / "protocol.py").exists())
+sys.path.insert(0, str(REPO_ROOT))
 
 from common.config import read_file                   # noqa: E402
 
 ASSISTANT_CONFIG = HERE / "config" / "assistant.yaml"
-ENV_FILE = HERE / ".env"
+# .env 는 vision_service 폴더(llm/ 바깥)에 둔다. llm/ 안에 있으면 그것도 읽는다
+ENV_FILE = next((d / ".env" for d in (HERE, HERE.parent) if (d / ".env").exists()), HERE.parent / ".env")
 
 DEFAULTS = {
     "gemini_enabled": True,

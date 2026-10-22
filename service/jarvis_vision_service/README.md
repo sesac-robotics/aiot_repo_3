@@ -71,7 +71,7 @@ control ◀──explain_text {event_id, text, mode, seq, situation}────
 - 답에는 어떤 도구를 불렀는지(`tools`)가 같이 간다 → 강사 화면에 근거로 보여줄 수 있다.
 - Gemini 3.x 는 도구 호출 응답의 `thoughtSignature` 를 다음 요청에 그대로 돌려줘야 한다 → 받은 content 를 그대로 대화에 넣는다.
 
-설정 (`config/assistant.yaml`): `ask_timeout_s`, `ask_max_tool_rounds`, `gemini_ask_timeout_s`, `ollama_ask_timeout_s`,
+설정 (`llm/config/assistant.yaml`): `ask_timeout_s`, `ask_max_tool_rounds`, `gemini_ask_timeout_s`, `ollama_ask_timeout_s`,
 `gemini_ask_model`(질의용 Gemini, 비우면 `gemini_model`), `ask_ollama_model`(비우면 `ollama_model`. 3b 가 도구를 잘 못 고르면 7b 로), `ask_tool_timeout_s`, `ask_max_chars`, `ask_max_concurrent`.
 
 ## 팬틸트로 좌석 보기 (기능 2 확장, 10/22)
@@ -96,20 +96,23 @@ control ◀──explain_text {event_id, text, mode, seq, situation}────
 - **숫자는 control 이 집계한 값이 그대로 화면에 나간다. LLM 은 문장(오늘 요약 2~3문장, 살펴볼 점 0~3개)만 쓴다.**
 - 좌석 번호만, 반 평균만. 순서: Gemini(JSON 응답) → Ollama(format=json) → 규칙으로 만든 문장(mode `default`).
 - 강사 화면: ⑤ 창의 [수업 종료 리포트] → 요약 카드 [리포트 열기] → 좌석도 자리에 ⑥ 리포트 (PDF 저장·인쇄).
-- 설정: `report_timeout_s`(40), `ollama_report_timeout_s`(30). 터미널 시험: `python3 ask_demo.py --report`
+- 설정: `report_timeout_s`(40), `ollama_report_timeout_s`(30). 터미널 시험: `python3 llm/ask_demo.py --report`
 
 ## 파일
 
+`run_assistant.py`(노드 실행)와 `.env`·`.env.example` 은 이 폴더에, AI 조교(LLM) 코드와 설정은 `llm/` 폴더에 있다.
+명령은 이 폴더(`service/jarvis_vision_service`)에서 실행한다.
+
 | 파일 | 내용 |
 | --- | --- |
-| `report.py` | **[리포트]** 요약·살펴볼 점 작성 (`write_report`), `ReportWorker`(report_write 처리) |
-| `ask.py` | **[질의]** 도구 정의(`TOOL_DECLS`), Gemini·Ollama tool calling 루프, `AskWorker`(ask_request·tool_result 처리) |
-| `ask_demo.py` | **[질의] 터미널 시험.** 강사 화면·vision 역할로 control 에 붙어 질문하고 답·근거 도구를 본다 |
-| `alert_demo.py` | **알림 문구 터미널 시험.** vision_service·강사 화면 역할로 control 에 붙어 사건을 넣고 문구를 본다 |
+| `llm/report.py` | **[리포트]** 요약·살펴볼 점 작성 (`write_report`), `ReportWorker`(report_write 처리) |
+| `llm/ask.py` | **[질의]** 도구 정의(`TOOL_DECLS`), Gemini·Ollama tool calling 루프, `AskWorker`(ask_request·tool_result 처리) |
+| `llm/ask_demo.py` | **[질의] 터미널 시험.** 강사 화면·vision 역할로 control 에 붙어 질문하고 답·근거 도구를 본다 |
+| `llm/alert_demo.py` | **알림 문구 터미널 시험.** vision_service·강사 화면 역할로 control 에 붙어 사건을 넣고 문구를 본다 |
 | `run_assistant.py` | 노드 실행 파일. `explain_request` 를 받으면 별도 스레드에서 `llm.explain_event` 호출 (동시 2개까지). 시작할 때 Ollama 모델을 미리 올림 |
-| `llm.py` | Gemini → Ollama → 기본 문구. 프롬프트, 답 다듬기·검사, 단독 시험 명령 |
-| `assistant_config.py` | `config/assistant.yaml` + `.env` 읽기 |
-| `config/assistant.yaml` | 모델 이름·대기 시간 등 설정 (git 에 올림) |
+| `llm/llm.py` | Gemini → Ollama → 기본 문구. 프롬프트, 답 다듬기·검사, 단독 시험 명령 |
+| `llm/assistant_config.py` | `config/assistant.yaml` + `.env` 읽기 |
+| `llm/config/assistant.yaml` | 모델 이름·대기 시간 등 설정 (git 에 올림) |
 | `.env.example` | `.env` 틀 (git 에 올림) |
 | `.env` | **Gemini API 키. git 에 올리지 않는다** (`.gitignore`) |
 
@@ -142,11 +145,11 @@ ollama list
 ### 3. 확인
 
 ```bash
-python3 assistant_config.py                      # 설정 값, 키 있음/없음 (키 값은 안 보여줌)
-python3 llm.py --kind fall --seat 3              # [gemini] 또는 [ollama] 문장이 나오면 OK
+python3 llm/assistant_config.py                      # 설정 값, 키 있음/없음 (키 값은 안 보여줌)
+python3 llm/llm.py --kind fall --seat 3              # [gemini] 또는 [ollama] 문장이 나오면 OK
 ```
 
-## 설정 (`config/assistant.yaml`)
+## 설정 (`llm/config/assistant.yaml`)
 
 | 키 | 값 | 설명 |
 | --- | --- | --- |
@@ -167,12 +170,12 @@ python3 llm.py --kind fall --seat 3              # [gemini] 또는 [ollama] 문�
 ### LLM 만 (control 없이)
 
 ```bash
-python3 llm.py --kind fall --seat 3                         # 실제 순서 그대로
-python3 llm.py --kind question --seat 2 --waiting 1
-python3 llm.py --kind away --seat 4
-python3 llm.py --only ollama --kind fall --seat 3           # 한 단계만
-python3 llm.py --only gemini --timeout 30 --repeat 5        # Gemini 를 30초까지 기다리며 5번 → 성공률·시간 요약
-python3 llm.py --only gemini --model gemini-3.1-flash-lite --repeat 5   # 다른 모델 비교 (설정 파일은 안 바뀜)
+python3 llm/llm.py --kind fall --seat 3                         # 실제 순서 그대로
+python3 llm/llm.py --kind question --seat 2 --waiting 1
+python3 llm/llm.py --kind away --seat 4
+python3 llm/llm.py --only ollama --kind fall --seat 3           # 한 단계만
+python3 llm/llm.py --only gemini --timeout 30 --repeat 5        # Gemini 를 30초까지 기다리며 5번 → 성공률·시간 요약
+python3 llm/llm.py --only gemini --model gemini-3.1-flash-lite --repeat 5   # 다른 모델 비교 (설정 파일은 안 바뀜)
 ```
 
 ### 알림 문구 터미널 시험 (control 과 TCP 로 주고받음)
@@ -182,9 +185,9 @@ python3 llm.py --only gemini --model gemini-3.1-flash-lite --repeat 5   # 다른
 cd service/jarvis_control_service && python3 run_hub.py
 # 터미널 2: (run_assistant.py 는 끈 상태로)
 cd service/jarvis_vision_service
-python3 alert_demo.py --auto      # 정해진 시나리오 약 45초: 질문 → 쓰러짐 선점 → 대기 → 손 내림 → 일어남 → 15/30초 알림 → 완료
-python3 alert_demo.py             # 직접 입력: f 3 / q 2 / a 4 (뒤에 end 붙이면 종료), c 1 확인, r 1 완료, d 1 오감지, ls
-python3 alert_demo.py -v          # LLM 실패·건너뜀 로그도 보기
+python3 llm/alert_demo.py --auto      # 정해진 시나리오 약 45초: 질문 → 쓰러짐 선점 → 대기 → 손 내림 → 일어남 → 15/30초 알림 → 완료
+python3 llm/alert_demo.py             # 직접 입력: f 3 / q 2 / a 4 (뒤에 end 붙이면 종료), c 1 확인, r 1 완료, d 1 오감지, ls
+python3 llm/alert_demo.py -v          # LLM 실패·건너뜀 로그도 보기
 ```
 
 출력 예:
@@ -197,7 +200,7 @@ python3 alert_demo.py -v          # LLM 실패·건너뜀 로그도 보기
   10.3s            3번 좌석 학생이 쓰러진 것으로 감지되었습니다. 바로 확인해 주세요. 2번 좌석 질문은 잠시 대기합니다.
 ```
 
-LLM 만 상황별로: `python3 llm.py --kind fall --seat 3 --situation fall_neighbor --elapsed 15`
+LLM 만 상황별로: `python3 llm/llm.py --kind fall --seat 3 --situation fall_neighbor --elapsed 15`
 
 ### 강사 자연어 질의 터미널 시험
 
@@ -206,10 +209,10 @@ LLM 만 상황별로: `python3 llm.py --kind fall --seat 3 --situation fall_neig
 cd service/jarvis_control_service && python3 run_hub.py
 # 터미널 2: (run_assistant.py 는 끈 상태로)
 cd service/jarvis_vision_service
-python3 ask_demo.py --seed --questions      # 예시 이벤트를 만들고 준비된 질문 10개 → 모드·시간·도구 요약
-python3 ask_demo.py                         # 직접 질문. /seed 예시 데이터, /f 3 사건 넣기, /ls 목록, /x 끝
-python3 ask_demo.py --ask "오늘 쓰러짐 몇 번 있었어?"
-python3 ask_demo.py -v                      # LLM·도구 로그까지
+python3 llm/ask_demo.py --seed --questions      # 예시 이벤트를 만들고 준비된 질문 10개 → 모드·시간·도구 요약
+python3 llm/ask_demo.py                         # 직접 질문. /seed 예시 데이터, /f 3 사건 넣기, /ls 목록, /x 끝
+python3 llm/ask_demo.py --ask "오늘 쓰러짐 몇 번 있었어?"
+python3 llm/ask_demo.py -v                      # LLM·도구 로그까지
 ```
 
 출력 예:

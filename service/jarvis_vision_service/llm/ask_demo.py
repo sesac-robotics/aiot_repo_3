@@ -9,10 +9,10 @@ control 에 TCP 로 두 노드를 붙인다 (alert_demo.py 와 같은 방식).
 
 실행 (control 을 먼저 켠다. run_assistant.py 는 끈다 — 같은 vision_service 이름이라 겹친다):
     터미널 1:  cd service/jarvis_control_service && python3 run_hub.py
-    터미널 2:  cd service/jarvis_vision_service  && python3 ask_demo.py              # 질문을 직접 입력
-               python3 ask_demo.py --seed --questions                                # 예시 데이터 + 질문 10개 측정
-               python3 ask_demo.py --seed --questions --alert-ollama                 # 예시 데이터의 알림 문구는 Ollama 로 (한도 아끼기)
-               python3 ask_demo.py --ask "오늘 쓰러짐 몇 번 있었어?"                   # 한 번만 묻고 끝
+    터미널 2:  cd service/jarvis_vision_service  && python3 llm/ask_demo.py              # 질문을 직접 입력
+               python3 llm/ask_demo.py --seed --questions                              # 예시 데이터 + 질문 10개 측정
+               python3 llm/ask_demo.py --seed --questions --alert-ollama                 # 예시 데이터의 알림 문구는 Ollama 로 (한도 아끼기)
+               python3 llm/ask_demo.py --ask "오늘 쓰러짐 몇 번 있었어?"                   # 한 번만 묻고 끝
 
 입력:
     그냥 문장       질문 (예: 오늘 쓰러짐 몇 번 있었어?)

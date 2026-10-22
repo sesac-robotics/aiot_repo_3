@@ -8,9 +8,9 @@ control 에 TCP 로 두 노드를 붙인다.
 
 실행 (control 을 먼저 켠다. run_assistant.py 는 끈다 — 같은 vision_service 이름이라 겹친다):
     터미널 1:  cd service/jarvis_control_service && python3 run_hub.py
-    터미널 2:  cd service/jarvis_vision_service  && python3 alert_demo.py            # 명령을 직접 입력
-               python3 alert_demo.py --auto                                         # 정해진 시나리오 (약 45초)
-               python3 alert_demo.py --alert-ollama                                 # 알림 문구에 Gemini 를 쓰지 않음 (한도 아끼기)
+    터미널 2:  cd service/jarvis_vision_service  && python3 llm/alert_demo.py            # 명령을 직접 입력
+               python3 llm/alert_demo.py --auto                                         # 정해진 시나리오 (약 45초)
+               python3 llm/alert_demo.py --alert-ollama                                 # 알림 문구에 Gemini 를 쓰지 않음 (한도 아끼기)
 
 명령:
     f 3        3번 좌석 쓰러짐 start        f 3 end   일어남 (end)
@@ -30,9 +30,10 @@ import threading
 import time
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent                         # service/jarvis_vision_service/llm/
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1]))                       # aiot_repo_3/ (common/)
+sys.path.insert(0, str(HERE.parent))                           # run_assistant.py 가 있는 vision_service 폴더
+sys.path.insert(0, str(next(p for p in HERE.parents if (p / "common" / "protocol.py").exists())))   # aiot_repo_3/
 
 import llm                                                     # noqa: E402
 import run_assistant as ra                                     # noqa: E402  (LLM_CFG, explain_slots 재사용)
