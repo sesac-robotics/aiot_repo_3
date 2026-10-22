@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 
-from .config import load, save, registration, validate
+from .config import Enrollment, load, save, registration, validate
 from .core import Person, SeatMatcher, distance
 from .decision_demo import DecisionDemo
 
@@ -119,8 +119,7 @@ def main():
     source = None
     armed = None
     selected = None
-    samples = []
-    sample_start = None
+    enroll = None                      # 지금 등록 중인 좌석의 어깨 표본 (config.Enrollment)
     current = []
     current_shape = None
     pending_click = None
@@ -197,40 +196,43 @@ def main():
                             and (len(candidates) == 1 or candidates[1][0]-candidates[0][0] > .025)
                             and candidates[0][1].track_id is not None):
                         selected = candidates[0][1].track_id
-                        samples = []
-                        sample_start = now
+                        enroll = Enrollment(now)
                         message = f'Seat {armed}: collecting normal seated shoulders (2s)'
+                    elif not candidates:
+                        message = 'Cannot select: no clear shoulders near the click (student too small/hidden?)'
+                    elif candidates[0][1].track_id is None:
+                        message = 'Cannot select: person has no tracker ID yet; wait a moment and click again'
                     else:
                         message = 'Cannot select: click close to clear shoulder midpoint, not overlapping people'
                 if selected is not None:
                     person = next((p for p in current if p.track_id == selected), None)
                     anchor = person.anchor(a.kpt_conf) if person else None
                     scale = person.scale(aspect, a.kpt_conf) if person else None
-                    if not fresh or anchor is None or scale is None:
+                    ok = fresh and anchor is not None and scale is not None
+                    state = enroll.add((*anchor, scale) if ok else None, now)
+                    if state == 'cancelled':
                         selected = None
-                        samples = []
-                        message = 'Registration cancelled: shoulders/track lost; click again'
-                    else:
-                        samples.append((*anchor, scale))
-                        if now-sample_start >= 2:
-                            try:
-                                entry = registration(samples, aspect)
-                                cfg = config or {'version': 1, 'camera_id': 1, 'aspect': aspect, 'seats': {}}
-                                # A person cannot register multiple seats without an explicit new selection.
-                                for s, old in cfg['seats'].items():
-                                    if str(s) != str(armed) and distance(old['anchor'], entry['anchor'], aspect) < .04:
-                                        raise ValueError(f'Too close to seat {s}; choose correct student')
-                                cfg['seats'][str(armed)] = entry
-                                cfg['source_note'] = a.source
-                                save(a.seats, cfg)
-                                config = cfg
-                                matcher = SeatMatcher(config, a.kpt_conf)
-                                message = f'Seat {armed} saved. Next 1-4 or restart without --calibrate'
-                                armed = None
-                            except ValueError as exc:
-                                message = str(exc)
-                            selected = None
-                            samples = []
+                        message = f'Registration cancelled: {enroll.reason}; click again'
+                    elif state == 'collecting':
+                        message = f'Seat {armed}: collecting shoulders {len(enroll.samples)}/{enroll.min_samples}'
+                    else:                                    # 'done': 표본이 다 모임
+                        try:
+                            entry = registration(enroll.samples, aspect)
+                            cfg = config or {'version': 1, 'camera_id': 1, 'aspect': aspect, 'seats': {}}
+                            # A person cannot register multiple seats without an explicit new selection.
+                            for s, old in cfg['seats'].items():
+                                if str(s) != str(armed) and distance(old['anchor'], entry['anchor'], aspect) < .04:
+                                    raise ValueError(f'Too close to seat {s}; choose correct student')
+                            cfg['seats'][str(armed)] = entry
+                            cfg['source_note'] = a.source
+                            save(a.seats, cfg)
+                            config = cfg
+                            matcher = SeatMatcher(config, a.kpt_conf)
+                            message = f'Seat {armed} saved. Next 1-4 or restart without --calibrate'
+                            armed = None
+                        except ValueError as exc:
+                            message = str(exc)
+                        selected = None
                 rows = (matcher.observe(current, mono) if fresh else matcher.unknown('STALE_INFERENCE')) if matcher else []
                 obs = {'schema': 'fixed_seat_obs_v1', 'camera_id': 1, 'session': session,
                        'frame_id': fid, 'captured_at': captured, 'processed_at': time.time(),
