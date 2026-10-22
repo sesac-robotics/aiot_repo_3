@@ -1,6 +1,6 @@
 """Vision node: hub UDP frames -> pose observations / track_obs over TCP v3.
 
-Calibration uses run_fixed_vision.py before starting the streamers.
+Calibration uses fixed_camera/app.py --calibrate (on the PC with the fixed camera) before starting the streamers.
 Seats: every seat registered in fixed_seats.local.json (--only-seat N for a one-seat test).
 cam2 tracking refuses multi-person frames (no cross-camera identity yet).
 
@@ -11,6 +11,7 @@ AI 조교(LLM) 기능 (main 에서 합침, llm/ 폴더):
 - [리포트] report_write 를 받으면 report.py 가 오늘 숫자를 읽고 요약·살펴볼 점을 써서 report_text 로 돌려준다.
 """
 import argparse
+import collections
 import json
 import logging
 from pathlib import Path
@@ -39,6 +40,8 @@ from assistant_config import load_assistant_config
 log = logging.getLogger('vision')
 ROOT = Path(__file__).resolve().parent
 WARN_S = 10.0           # 같은 경고(버린 프레임, 처리 오류, 영상 비율)를 다시 찍기까지 최소 간격
+MAX_LAG_S = .8          # 수신 지연(시계 차이를 뺀 값)이 이보다 크면 밀린 프레임으로 보고 버린다 (Control OBS_GAP_S 와 같게)
+CLOCK_WINDOW_S = 10.0   # 카메라 PC 시계 차이를 이 구간의 최소 (수신 시각 - 촬영 시각) 으로 추정한다
 MIN_SEAT_FPS = 2.0      # Control 판정은 관측 간격 0.8초(약 1.25 fps)를 넘으면 처음부터 다시 센다 → 여유를 두고 경고
 
 LLM_CFG = load_assistant_config()                                     # config/assistant.yaml + .env
@@ -69,6 +72,31 @@ def nose_target(people):
     return tuple(people[0].keypoints[0][:2])
 
 
+class ClockSync:
+    """카메라 PC 시계를 이 PC 시계로 옮긴다 (NTP 가 안 맞아도 동작하게).
+
+    raw = 수신 시각 - 촬영 시각 = 네트워크·처리 지연 + 두 PC 시계 차이.
+    같은 LAN 에서 가장 빨리 온 프레임의 지연은 수 ms 이므로, 최근 CLOCK_WINDOW_S 동안의 최소 raw 를
+    시계 차이로 본다. 촬영 시각에 이 값을 더하면 이 PC 시계 기준 촬영 시각이 되고,
+    lag = raw - 최소 raw 는 '평소보다 얼마나 늦게 왔는지'(밀림)만 남는다.
+    10/22: 고정 카메라 PC 가 0.65초 빨라 모든 cam1 프레임이 -0.2~0.8초 검사에 걸려 버려졌다.
+    카메라 시계가 갑자기 뒤로 가면(NTP 맞춤) 최대 CLOCK_WINDOW_S 동안 lag 가 커 보일 수 있다."""
+
+    def __init__(self, window=CLOCK_WINDOW_S):
+        self.window = window
+        self.mins = collections.deque()          # (수신 시각, raw) - raw 가 커지는 순서로만 남긴다 (구간 최소)
+
+    def update(self, now, captured):
+        raw = now - captured
+        while self.mins and self.mins[-1][1] >= raw:
+            self.mins.pop()
+        self.mins.append((now, raw))
+        while self.mins[0][0] < now - self.window:
+            self.mins.popleft()
+        offset = self.mins[0][1]
+        return captured + offset, raw - offset, offset     # (이 PC 기준 촬영 시각, 밀림, 시계 차이)
+
+
 class Receiver:
     def __init__(self, cam, bind):
         self.cam = cam
@@ -77,19 +105,30 @@ class Receiver:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((bind, VISION_VIDEO_PORTS[cam]))
         self.sock.settimeout(.2)
-        self.stale, self.worst_age, self.warned_at = 0, 0., 0.   # 시계 차이로 버린 프레임 (경고용)
+        self.clock = ClockSync()
+        self.offset = 0.                          # 지금 보정 중인 시계 차이 (초, 상태 로그용)
+        self.stale, self.worst_lag, self.warned_at = 0, 0., 0.   # 밀려서 버린 프레임 (경고용)
+        self.offset_logged = None
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
-    def _drop_stale(self, age):
-        """카메라 PC 와 이 PC 의 시계가 어긋나면 모든 프레임이 버려진다. 조용히 버리지 않고 알린다."""
+    def _drop_stale(self, lag):
+        """밀린 프레임은 조용히 버리지 않고 10초마다 몇 개 버렸는지 알린다."""
         self.stale += 1
-        self.worst_age = max(self.worst_age, abs(age))
+        self.worst_lag = max(self.worst_lag, lag)
         now = time.time()
         if now - self.warned_at >= WARN_S:
-            log.warning('cam%d 프레임 %d개 버림: 촬영 시각 차이 최대 %.2f초 (허용 -0.2~0.8초). '
-                        '카메라 PC 와 Vision PC 의 시계를 맞추세요 (NTP)', self.cam, self.stale, self.worst_age)
-            self.stale, self.worst_age, self.warned_at = 0, 0., now
+            log.warning('cam%d 프레임 %d개 버림: 평소보다 최대 %.2f초 늦게 도착 (허용 %.1f초). '
+                        '네트워크나 카메라 PC 가 밀리고 있습니다', self.cam, self.stale, self.worst_lag, MAX_LAG_S)
+            self.stale, self.worst_lag, self.warned_at = 0, 0., now
+
+    def _log_offset(self, offset):
+        """시계 차이가 크게 바뀌었을 때만 알린다 (보정은 계속 됨, NTP 를 맞추면 0 에 가까워진다)."""
+        if self.offset_logged is None or abs(offset - self.offset_logged) >= .1:
+            self.offset_logged = offset
+            (log.warning if abs(offset) >= .2 else log.info)(
+                'cam%d 카메라 PC 시계 차이 %+.2f초를 보정해서 씁니다%s', self.cam, -offset,
+                ' (카메라 PC 를 NTP 로 맞추면 좋습니다)' if abs(offset) >= .2 else '')
 
     def run(self):
         last_id, last_capture = None, 0.
@@ -103,19 +142,22 @@ class Receiver:
             if len(data) <= VIDEO_HEADER.size or data[0] != self.cam:
                 continue
             cam, fid, captured = VIDEO_HEADER.unpack_from(data)
-            age = time.time()-captured
-            if not -.2 <= age <= .8:
-                self._drop_stale(age)
-                continue
-            # Allow a streamer's frame counter to restart, using newer capture time.
+            # 순서 확인은 카메라 PC 시계 그대로 (같은 시계끼리 비교). Allow a streamer's frame counter
+            # to restart, using newer capture time.
             if captured <= last_capture or (fid == last_id):
                 continue
             last_id, last_capture = fid, captured
+            local, lag, self.offset = self.clock.update(time.time(), captured)
+            self._log_offset(self.offset)
+            if lag > MAX_LAG_S:
+                self._drop_stale(lag)
+                continue
             try:
                 self.latest.get_nowait()
             except queue.Empty:
                 pass
-            self.latest.put_nowait((fid, captured, data[VIDEO_HEADER.size:]))
+            # 이후(판정·seat_obs·track_obs)는 이 PC 시계 기준 촬영 시각을 쓴다 → Control 의 시각 검사와도 맞는다
+            self.latest.put_nowait((fid, local, data[VIDEO_HEADER.size:]))
 
     def close(self):
         self.stop.set()
@@ -146,7 +188,7 @@ def main():
     if args.only_seat is not None:
         key = str(args.only_seat)
         if key not in calibration['seats']:
-            ap.error(f'Register seat {key} with run_fixed_vision.py --calibrate first')
+            ap.error(f'Register seat {key} with python3 -m fixed_camera.app --calibrate first')
         calibration['seats'] = {key: calibration['seats'][key]}
     import cv2
     import numpy as np
@@ -236,7 +278,7 @@ def main():
             if cam == 1 and not aspect_ok:
                 # 등록할 때와 영상 비율이 다르면 좌석 위치가 맞지 않는다. 멈추지 않고 '모름'으로 보낸다.
                 warn_once('aspect', 'cam1 영상 비율 %.3f 이 등록 비율 %.3f 과 다릅니다. '
-                          'run_fixed_vision.py --calibrate 로 좌석을 다시 등록하세요 (그동안 1번 좌석은 모름)',
+                          'python3 -m fixed_camera.app --calibrate 로 좌석을 다시 등록하세요 (그동안 좌석은 모름)',
                           w/h, calibration['aspect'])
                 result = None
             elif cam == 1:
@@ -282,7 +324,8 @@ def main():
             if now-stats['started'] >= 2:
                 fps = stats['count']/(now-stats['started'])
                 client.set_status(**{f'cam{cam}_fps': fps})
-                log.info('cam%d analysis %.1f fps, age %.0f ms', cam, fps, (now-captured)*1000)
+                log.info('cam%d analysis %.1f fps, age %.0f ms (시계 차이 %+.2fs 보정)', cam, fps,
+                         (now-captured)*1000, -receiver.offset)
                 if cam == 1 and fps < MIN_SEAT_FPS:
                     log.warning('cam1 분석 %.1f fps: %.0f fps 보다 느리면 손들기·자리비움이 확정되지 않을 수 있습니다 '
                                 '(--imgsz 를 줄이거나 GPU 를 쓰세요)', fps, MIN_SEAT_FPS)
