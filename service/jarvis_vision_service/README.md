@@ -1,9 +1,216 @@
 # jarvis_vision_service (vision_service 노드)
 
-강사 노트북에서 도는 Vision 노드. 두 카메라 영상을 보고 사건(쓰러짐·질문·자리 비움)을 control 에 보내고,
-추적 오차를 보내고, **AI 조교 상황 설명(LLM)** 을 만든다.
+고정카메라·능동카메라 영상을 분석하고, 중앙 서버(Control)에 좌석별 관측과 추적 좌표를 보내는 Vision 노드다. AI 조교의 상황 설명·자연어 질의·수업 종료 리포트도 같은 프로세스에서 처리한다.
 
-이 문서는 지금 구현된 **AI 조교(LLM) 부분** 위주다. 감지(`detect`)·추적(`find_offset`)은 아직 TODO.
+현재 카메라 운영 범위는 **손들기(질문)·자리비움·능동카메라 추적**이다. 쓰러짐 감지는 포함하지 않는다. 아래 AI 조교 문서의 쓰러짐 관련 메시지·예제는 기존 프로토콜과 시험 기록이며, 현재 카메라가 쓰러짐을 검출한다는 뜻은 아니다.
+
+## 카메라 인식·추적 흐름
+
+1. 카메라가 연결된 PC에서 `run_fixed_camera.py`(cam1), `run_pantilt_camera.py`(cam2)를 실행해 영상을 Control에 보낸다.
+2. Control은 영상을 강사 화면과 Vision에 중계한다. Vision은 웹캠을 직접 열지 않는다.
+3. Vision은 cam1을 YOLO Pose·ByteTrack으로 분석해 좌석별 재실·손들기 관측(`seat_obs`)을 전송한다.
+4. Control이 관측 유지시간으로 이벤트를 확정하고, 우선순위·대기열에 따라 대상 좌석을 선택한다. PanTiltService가 좌석 프리셋으로 이동하고 Vision에는 `track_target`을 보낸다.
+5. Vision은 cam2에서 검출한 코 위치를 `track_obs`로 보낸다. 실제 각도 보정·재탐색·원위치 복귀와 Arduino 시리얼 통신은 Control 안의 PanTiltService가 담당한다.
+
+| 메시지 | 방향 | 내용 |
+| --- | --- | --- |
+| `seat_obs` | Vision → Control | 세션·프레임·시각, 좌석별 `present`, `hand_up`, 판정 근거 |
+| `track_target` | Control → Vision | 대상 `seat`, 대상 변경 세대 번호 `gen` |
+| `track_obs` | Vision → Control | 좌석, `gen`, 프레임·촬영 시각, `TRACKED` 또는 `LOST`, 유효하면 `cx`, `cy` |
+
+`cx`, `cy`는 **cam2 영상 기준 0~1 좌표**이며 화면 중앙은 `(0.5, 0.5)`다. cam1의 사람 ID나 좌표를 cam2에 그대로 사용하지 않는다. `gen`은 이전 대상의 늦은 관측을 구분하는 데 사용한다. 노드 메시지는 공통 TCP v3 바이너리 프로토콜을 사용한다.
+
+### 고정카메라 좌석 관측
+
+최초 등록 때 좌석 번호를 선택하고 앉아 있는 사람의 어깨 중심 근처를 클릭해 기준 위치·크기를 저장한다. 좌석별 영상을 잘라내거나 사각형을 그려 겹침률로 판단하는 방식이 아니다.
+
+- 고정카메라는 높이를 확보해 앞사람이 뒷사람의 상체·팔을 가리는 정도를 줄인다. 위치·각도 변경 후에는 좌석을 다시 등록한다.
+- `present`와 `hand_up`은 각각 `True` / `False` / `None`이다. `None`은 관측 불가이며 부재나 손 내림으로 취급하지 않는다.
+- 몸 숙임·가림·좌석 연결이 애매한 상황은 보수적으로 UNKNOWN이 될 수 있다. 카메라 밖으로 나간 경우도 등록 위치 주변의 관측과 중앙 유지시간 판단을 거친다.
+- 영상 비율이 등록 당시와 다르면 `ASPECT_CHANGED`, 분석 결과가 오래됐으면 `STALE`로 보낸다.
+- 실제 이벤트 확정은 Control에서 한다. 단독 실행기의 `DecisionDemo`는 로컬 시험용이다.
+
+### 능동카메라 추적 조건
+
+- 화면에서 **사람 한 명이 검출되고 코 키포인트가 유효할 때** 좌표를 보낸다.
+- 사람이 없거나 여러 명이 검출되거나 코가 유효하지 않으면 `LOST`를 보낸다. 두 카메라 사이 동일 인물 식별은 구현돼 있지 않다.
+- 대상 지정 이후 촬영된 프레임만 사용하며, 촬영부터 처리까지 0.3초를 넘으면 좌표 대신 `LOST`를 보낸다.
+- 최근 프레임 하나를 우선 처리한다. 수신 시 카메라 PC와의 시계 차이를 추정·보정하고, 평소보다 0.8초 넘게 늦은 프레임은 버린다.
+
+## 카메라 관련 파일·설정
+
+경로는 저장소 루트 기준이다.
+
+| 파일 | 역할 |
+| --- | --- |
+| `service/jarvis_vision_service/run_assistant.py` | 두 영상 분석·관측 전송·추적 대상 수신·AI 조교 통합 실행 |
+| `service/jarvis_vision_service/run_fixed_vision.py` | 고정카메라 좌석 등록·단독 시험 |
+| `service/jarvis_vision_service/fixed_camera/app.py` | 등록 화면·로컬 카메라 입력·시험 로그 |
+| `service/jarvis_vision_service/fixed_camera/core.py` | 좌석 매칭·손들기 관측 |
+| `service/jarvis_vision_service/fixed_camera/config.py` | 좌석 기준 저장·검증 |
+| `service/jarvis_vision_service/fixed_camera/bytetrack_fixed.yaml` | 고정카메라 추적 설정 |
+| `service/jarvis_vision_service/config/fixed_seats.local.json` | 현장 등록으로 생성하는 좌석 설정 |
+| `hw/camera_streamer/run_fixed_camera.py` | 고정카메라 cam1 영상 송출 |
+| `hw/camera_streamer/run_pantilt_camera.py` | 능동카메라 cam2 영상 송출 |
+| `config/common.yaml` | Control IP·TCP 포트 |
+| `service/jarvis_control_service/config/presets.json` | 현장에 맞게 등록한 팬틸트 좌석 각도 |
+
+팬틸트 상세 동작은 [PanTiltService 문서](../jarvis_control_service/hub/pantilt/README.md), 배선·펌웨어는 [Camera Controller 문서](../../hw/camera_controller/README.md)를 참고한다.
+
+## 카메라 실행 준비
+
+### PC 배치·통신
+
+아래 실행 예시는 **강사 컴퓨터에서 Control·Vision·강사 GUI를 함께 실행**하는 배치다. Vision 실행 위치가 별도 PC라면 그 PC로 좌석 설정·모델을 준비하고 `--server`에 강사 컴퓨터 IP를 넣는다.
+
+| PC | 실행·연결 |
+| --- | --- |
+| 고정카메라 노트북 | 좌석 등록 후 cam1 송출 |
+| 능동카메라 연결 PC | cam2 송출. 고정카메라 노트북과 같아도 됨 |
+| 강사 컴퓨터 | Control·Vision·GUI 실행, Arduino USB 연결 |
+
+현재 PanTiltService는 Control과 같은 프로세스에서 Arduino 시리얼 포트를 직접 연다. `run_controller.py`를 함께 실행하거나 시리얼 모니터를 열어 포트를 중복 점유하지 않는다.
+
+| 통신 | 받는 PC·포트(기본값) |
+| --- | --- |
+| 노드 ↔ Control | 강사 컴퓨터 TCP 5000 (`config/common.yaml` 기준) |
+| cam1 / cam2 → Control | 강사 컴퓨터 UDP 6001 / 6002 |
+| Control → Vision | Vision PC UDP 5021 / 5022 |
+| Control → GUI | GUI PC UDP 5011 / 5012 |
+
+같은 LAN에서 해당 포트가 통신 가능해야 한다. 다른 PC에서 쓰는 `127.0.0.1`은 강사 컴퓨터가 아니라 그 PC 자신을 가리킨다. 카메라 송출의 `--target`에는 실제 강사 컴퓨터 LAN IP를 넣는다.
+
+### Python·모델
+
+각 터미널에서 해당 PC의 기존 프로젝트 가상환경을 활성화한다. 아래 명령의 `python3`가 그 환경을 사용하는지 확인한다.
+
+```bash
+# Vision·좌석 등록 PC
+python3 -c "import cv2, numpy, ultralytics; print(cv2.__version__, ultralytics.__version__)"
+
+# Control PC
+python3 -c "import serial, yaml; print('control dependencies OK')"
+
+# GUI PC
+python3 -c "import PyQt6; print('GUI dependencies OK')"
+```
+
+카메라 송출 PC에는 OpenCV가 필요하다. Vision·좌석 등록에는 Ultralytics와 그 추론 환경이 추가로 필요하며, 현재 루트 `requirements.txt`에는 `ultralytics`가 명시돼 있지 않다. 기존 YOLO 실행 환경을 먼저 확인한다.
+
+실제 보유한 `*-pose.pt` 경로를 지정한다. 아래 `yolo11s-pose.pt`는 예시이며 일반 객체 검출 모델은 사용할 수 없다. 통합 실행기는 모델을 자동 다운로드하지 않는다. CPU는 `--device cpu`, CUDA GPU는 `--device 0`을 사용한다.
+
+## 카메라 실행방법
+
+이 절의 명령은 **각 터미널에서 저장소 루트 `aiot_repo_3`로 이동한 상태**를 기준으로 한다. `/실제/경로/...`, `<강사컴퓨터_IP>`는 실제 값으로 바꾼다. 같은 프로그램은 한 번만 실행한다.
+
+### 1. 고정카메라 노트북: 최초 좌석 등록
+
+해당 카메라를 사용하는 송출기·다른 프로그램을 종료한 뒤 실행한다.
+
+```bash
+python3 service/jarvis_vision_service/run_fixed_vision.py \
+  --source 0 --model /실제/경로/yolo11s-pose.pt \
+  --device 0 --calibrate
+```
+
+1. 학생들이 평소 자세로 앉은 상태에서 화면에 키보드 포커스를 둔다.
+2. `1`을 누르고 1번 학생의 양 어깨 중간 근처를 클릭한다. 약 2초간 자세를 유지해 저장 안내를 확인한다.
+3. `2`, `3`, `4`도 같은 방식으로 등록한다. 등록된 좌석만 관측한다.
+4. `Q` 또는 `Esc`로 종료한다. `--source`는 실제 장치 번호 또는 `/dev/videoN`에 맞춘다.
+
+생성된 `service/jarvis_vision_service/config/fixed_seats.local.json`을 **강사 컴퓨터의 동일 경로로 복사**한다. Vision이 다른 PC에 있으면 그 PC로 복사한다. 이 로컬 파일과 모델은 Git pull만으로 준비된다고 가정하지 않는다. 카메라 높이·각도·구도를 바꾸면 재등록하고 새 파일을 다시 복사한다.
+
+### 2. 강사 컴퓨터: Arduino·Control 시작
+
+Arduino에 `hw/camera_controller/camera_controller.ino`를 업로드하고 시리얼 모니터를 닫는다. 실제 포트가 `/dev/ttyACM0`인지 확인한다.
+
+```bash
+python3 service/jarvis_control_service/run_hub.py \
+  --host 0.0.0.0 --pantilt-port /dev/ttyACM0
+```
+
+Arduino 없이 통신만 점검할 때는 `--pantilt-port /dev/ttyACM0` 대신 `--pantilt-sim`을 사용한다. 모의 실행으로 실물 모터 동작을 확인할 수는 없다. 영상 분석 시험에서는 `--no-video`를 사용하지 않는다.
+
+### 3. 강사 컴퓨터: GUI 시작
+
+새 터미널에서 실행한다.
+
+```bash
+python3 gui/instructor_console/run_console.py --host 127.0.0.1
+```
+
+GUI가 별도 PC라면 `--host`를 강사 컴퓨터 IP로 바꾼다. 시설 관리에서 각 좌석을 비추도록 프리셋 각도를 확인·등록한다. 실제 좌석 각도를 예시 값으로 덮어쓰지 않는다. 영상 확인은 다음 송출기를 켠 뒤 진행한다.
+
+### 4. 카메라 연결 PC: 두 영상 송출
+
+고정카메라 노트북에서:
+
+```bash
+python3 hw/camera_streamer/run_fixed_camera.py \
+  --device 0 --target <강사컴퓨터_IP>
+```
+
+능동카메라가 연결된 PC의 별도 터미널에서:
+
+```bash
+python3 hw/camera_streamer/run_pantilt_camera.py \
+  --device 2 --target <강사컴퓨터_IP>
+```
+
+`0`, `2`는 예시 장치 번호다. USB 연결 순서에 따라 달라질 수 있으므로 장치 안내를 확인한다. 두 카메라가 같은 노트북에 연결돼 있어도 각각 별도 터미널에서 실행한다. 스트리머는 기본 15fps·가로 최대 640px로 JPEG를 송출한다.
+
+### 5. 강사 컴퓨터: Vision 시작
+
+좌석 설정 복사와 Pose 모델 준비를 확인하고 새 터미널에서 실행한다.
+
+```bash
+python3 service/jarvis_vision_service/run_assistant.py \
+  --server 127.0.0.1 \
+  --model /실제/경로/yolo11s-pose.pt \
+  --device 0 --imgsz 640 \
+  --seats service/jarvis_vision_service/config/fixed_seats.local.json
+```
+
+Vision은 별도 카메라 프로그램을 열지 않고 Control이 중계한 두 영상을 분석한다. 모델 두 개를 로드·예열하므로 초기 대기시간이 있다. 이 프로세스가 AI 조교도 함께 실행하므로 AI 조교용으로 같은 `run_assistant.py`를 하나 더 켜지 않는다. Gemini·Ollama 준비는 아래 AI 조교 설정을 따른다.
+
+| 옵션 | 용도 |
+| --- | --- |
+| `--server`, `--port` | Control 주소·TCP 포트 재정의 |
+| `--device cpu` | CPU 추론 시험 |
+| `--imgsz 416` | 처리 속도 비교용 입력 크기 축소. 인식 결과도 다시 확인 |
+| `--only-seat 1` | 등록된 1번 좌석만 시험 |
+| `--record-keypoints /실제/경로/observations.jsonl` | cam1 좌표·좌석 관측 기록. 상위 폴더를 먼저 생성 |
+| `--record-dir /실제/경로/recordings` | 선택적인 Vision 측 시험 녹화 |
+
+Vision 측 녹화는 기본 꺼짐이며 분석한 프레임만 고정 15fps MP4와 시각 JSONL로 저장한다. Control의 이벤트 cam2 녹화·GUI 다시보기와는 별개다. 처리 속도가 낮으면 Vision MP4 재생 길이가 실제 촬영시간과 다를 수 있다.
+
+### 6. 동작 확인·종료
+
+1. 두 스트리머의 장치 열림·송출 FPS와 GUI의 cam1·cam2 영상을 확인한다.
+2. Vision의 `cam1 analysis`, `cam2 analysis` 로그와 `좌석 판정` 요약을 확인한다.
+3. 등록된 학생이 손을 들어 중앙의 질문 이벤트·대상 좌석 선택을 확인한다. Vision의 `Target` 로그 후 팬틸트가 해당 좌석 프리셋으로 이동하는지 본다.
+4. cam2에 해당 학생 한 명이 잘 보이는 상태에서 코 위치에 따라 모터가 보정되는지 확인한다. 두 명이 검출되거나 코가 가려질 때는 `LOST` 경로로 처리돼야 한다.
+5. 재실 확인 후 이석·복귀를 시험하고, 앞사람 가림·카메라 중단이 자리비움으로 오판되지 않는지 별도로 확인한다.
+6. 질문 완료와 대기 이벤트 처리·대기 사건이 없을 때 원위치 복귀를 GUI와 모터에서 확인한다.
+
+Vision 기본 로그가 `track_obs`를 매 프레임 출력하는 것은 아니다. 메시지 확인이 필요하면 Control을 `--verbose`로 실행한다. 영상 분석 FPS만으로 추적 성공을 판단하지 않는다. 종료는 각 터미널에서 `Ctrl+C`; Control 종료 시 팬틸트 정지·LED 끄기를 처리한다.
+
+## 카메라 문제 확인
+
+| 증상 | 확인·조치 |
+| --- | --- |
+| 카메라가 열리지 않음 | 장치 번호·USB 연결, 좌석 등록기 등 중복 점유 확인 |
+| GUI 영상은 보이나 Vision 분석 로그가 없음 | Vision TCP 접속과 UDP 5021/5022 수신, 중복 Vision 프로세스 확인 |
+| `ASPECT_CHANGED` | 등록·송출 영상 비율을 맞추고 필요하면 재등록 |
+| UNKNOWN이 많음 | 앞뒤 사람 가림·양 어깨 검출·등록 기준 확인. 위치를 조정했다면 재등록 |
+| `cam1 분석 ... 느리면 ...` | 2fps 미만 경고. GPU·모델 크기·입력 크기와 처리 지연 확인 |
+| cam2 영상은 오지만 추적하지 않음 | 중앙 대상 지정, 프리셋, 사람 한 명·코 유효성, 300ms 이내 처리 여부 확인 |
+| 프레임 버림·시계 차이 경고 | 네트워크·처리 부하와 PC 시간 동기화 확인. 시계 차이 보정 로그 자체가 연결 실패는 아님 |
+| 팬틸트 SAFE·시리얼 오류 | Arduino 펌웨어·포트·권한·중복 점유 확인. 모터 상세 문서 참조 |
+
+아래 AI 조교 절의 명령은 별도 안내가 없으면 `service/jarvis_vision_service` 폴더에서 실행한다.
+
+---
 
 ## AI 조교 흐름
 
@@ -99,7 +306,7 @@ control ◀──explain_text {event_id, text, mode, seq, situation}────
 - 반 컨디션 세부(10/22): 리포트 data 의 `condition_detail`(세부 6개 오늘 평균·가장 높았던 시간대)을 근거로 "집중 저하는 주로 졸음, 14시에 50%" 처럼 쓴다. LLM 이 모두 실패하면 규칙 문장도 같은 내용을 넣는다.
 - 설정: `report_timeout_s`(40), `ollama_report_timeout_s`(30). 터미널 시험: `python3 llm/ask_demo.py --report`
 
-## 파일
+## AI 조교 관련 파일
 
 `run_assistant.py`(노드 실행)와 `.env`·`.env.example` 은 이 폴더에, AI 조교(LLM) 코드와 설정은 `llm/` 폴더에 있다.
 명령은 이 폴더(`service/jarvis_vision_service`)에서 실행한다.
@@ -110,16 +317,16 @@ control ◀──explain_text {event_id, text, mode, seq, situation}────
 | `llm/ask.py` | **[질의]** 도구 정의(`TOOL_DECLS`), Gemini·Ollama tool calling 루프, `AskWorker`(ask_request·tool_result 처리) |
 | `llm/ask_demo.py` | **[질의] 터미널 시험.** 강사 화면·vision 역할로 control 에 붙어 질문하고 답·근거 도구를 본다 |
 | `llm/alert_demo.py` | **알림 문구 터미널 시험.** vision_service·강사 화면 역할로 control 에 붙어 사건을 넣고 문구를 본다 |
-| `run_assistant.py` | 노드 실행 파일. `explain_request` 를 받으면 별도 스레드에서 `llm.explain_event` 호출 (동시 2개까지). 시작할 때 Ollama 모델을 미리 올림 |
+| `run_assistant.py` | 카메라 분석·AI 조교 통합 실행 파일. `explain_request` 를 받으면 별도 스레드에서 `llm.explain_event` 호출 (동시 2개까지). 시작할 때 Ollama 모델을 미리 올림 |
 | `llm/llm.py` | Gemini → Ollama → 기본 문구. 프롬프트, 답 다듬기·검사, 단독 시험 명령 |
 | `llm/assistant_config.py` | `config/assistant.yaml` + `.env` 읽기 |
 | `llm/config/assistant.yaml` | 모델 이름·대기 시간 등 설정 (git 에 올림) |
 | `.env.example` | `.env` 틀 (git 에 올림) |
 | `.env` | **Gemini API 키. git 에 올리지 않는다** (`.gitignore`) |
 
-외부 패키지는 쓰지 않는다 (표준 라이브러리 `urllib` 만). `requirements.txt` 변경 없음.
+AI 조교의 HTTP 호출은 표준 라이브러리 `urllib`을 사용한다. 카메라 분석용 OpenCV·NumPy·Ultralytics 등은 별도로 필요하다.
 
-## 처음 설정
+## AI 조교 처음 설정
 
 ### 1. Gemini API 키
 
@@ -141,7 +348,7 @@ ollama pull qwen2.5:3b                            # VRAM 여유가 많으면 qwe
 ollama list
 ```
 
-다른 모델을 쓰면 `config/assistant.yaml` 의 `ollama_model` 을 바꾼다.
+다른 모델을 쓰면 `llm/config/assistant.yaml` 의 `ollama_model` 을 바꾼다.
 
 ### 3. 확인
 
@@ -150,7 +357,7 @@ python3 llm/assistant_config.py                      # 설정 값, 키 있음/�
 python3 llm/llm.py --kind fall --seat 3              # [gemini] 또는 [ollama] 문장이 나오면 OK
 ```
 
-## 설정 (`llm/config/assistant.yaml`)
+## AI 조교 설정 (`llm/config/assistant.yaml`)
 
 | 키 | 값 | 설명 |
 | --- | --- | --- |
@@ -166,7 +373,7 @@ python3 llm/llm.py --kind fall --seat 3              # [gemini] 또는 [ollama] 
 | `max_chars` | `120` | 강사 화면에 보낼 최대 글자 수 |
 | `max_concurrent` | `2` | 동시에 처리하는 설명 요청 수 |
 
-## 시험
+## AI 조교 시험
 
 ### LLM 만 (control 없이)
 
@@ -227,24 +434,13 @@ python3 llm/ask_demo.py -v                      # LLM·도구 로그까지
 
 준비된 질문 10개에는 "학생 이름이 뭐야?"(이름을 답하면 안 됨)와 "완료 처리해 줘"(조회만이라 안내해야 함)가 들어 있다.
 
-### control 과 연결 (터미널 3개, 실제 노드)
+### 실제 카메라와 AI 조교 통합 확인
 
-```bash
-# 1: control
-cd service/jarvis_control_service && python3 run_hub.py
-# 2: 강사 화면 흉내
-cd service/jarvis_control_service && python3 -m tools.fake_node --node instructor_console --server 127.0.0.1
-# 3: vision_service — 감지 대신 3초 뒤 2번 좌석 질문을 일부러 발생
-cd service/jarvis_vision_service && python3 -c '
-import sys, time; sys.argv=["run_assistant.py","--server","127.0.0.1"]
-import run_assistant as ra; t0=time.time()
-ra.detect = lambda: {(2,"question"): True} if time.time()-t0 > 3 else {}
-ra.main()'
-```
+앞의 **카메라 실행방법**에 따라 Control·GUI·스트리머·Vision을 실행한다. 손들기로 질문 이벤트를 만들고 Vision의 `-> explain_text event=...` 로그와 GUI의 설명 문구를 확인한다.
 
-3번 터미널에 `-> explain_text event=N [gemini] ...`, 2번 터미널의 `event_update` 에 같은 `explain_text` 가 보이면 OK.
+현재 `run_assistant.py`는 `--model`과 좌석 설정을 사용하는 통합 실행기다. 과거의 `ra.detect = lambda ...` 주입 예제는 현재 구조에 적용되지 않는다. 카메라 없이 알림·질의만 시험하려면 위 `llm/alert_demo.py` 또는 `llm/ask_demo.py`를 사용하고 통합 Vision은 종료한다.
 
-## 로그 읽기
+## AI 조교 로그 읽기
 
 | 로그 | 뜻 |
 | --- | --- |
@@ -258,6 +454,8 @@ ra.main()'
 | `gemini(...) 실패 ... GEMINI_API_KEY 없음` | `.env` 없음 또는 키 비어 있음 |
 
 ## 측정 기록 (모델 고른 근거)
+
+아래는 기존 담당자가 기록한 당시 측정·한도 정보다. 현재 카메라 성능 측정이나 API 제공사의 최신 한도 확인 결과는 아니다.
 
 | 날짜 | 모델 | 결과 |
 | --- | --- | --- |
