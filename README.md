@@ -58,35 +58,7 @@ SeSAC 피지컬 AI 과정 · 새싹 프로젝트 1 · AIoT 프로젝트 3팀 **S
 
 **장비가 보고, 서버가 판단하고, 화면이 알리는 3계층 구조**입니다. 모든 연결은 중앙 컨트롤 서비스 **Jarvis** 한 곳으로 모이고, 노드끼리는 직접 통신하지 않습니다. 그래서 판단은 한 곳에서만 일어납니다.
 
-```mermaid
-flowchart LR
-    subgraph EQ["Equipment · 보고"]
-        CAM1["고정 카메라 cam1<br/>Camera Streamer"]
-        CAM2["팬틸트 카메라 cam2<br/>Camera Streamer"]
-        UNO["Arduino Uno<br/>서보 ×2 · RGB LED"]
-    end
-    subgraph SV["Service · 판단"]
-        CTRL["Jarvis Control Service<br/>event_manager · PanTiltService"]
-        DB[("Jarvis DB<br/>SQLite")]
-        VIS["Jarvis Vision Service<br/>YOLO Pose · AI 조교"]
-    end
-    subgraph UI["UI · 알림"]
-        CON["Instructor Console<br/>강사 화면 (PyQt6)"]
-        STU["Student Client ×4<br/>학생 화면 (PyQt6)"]
-    end
-    LLM["Gemini API<br/>Ollama (로컬 백업)"]
-
-    CAM1 -- "UDP JPEG :6001" --> CTRL
-    CAM2 -- "UDP JPEG :6002" --> CTRL
-    CTRL -- "UDP 중계 :5021/5022" --> VIS
-    CTRL -- "UDP 중계 :5011/5012" --> CON
-    VIS <-- "TCP 바이너리 v3 :5000" --> CTRL
-    CON <-- "TCP :5000" --> CTRL
-    STU <-- "TCP :5000" --> CTRL
-    CTRL -- "USB Serial 9600bps" --> UNO
-    CTRL --- DB
-    VIS -- "HTTPS / HTTP" --> LLM
-```
+<img width="1152" height="812" alt="image" src="https://github.com/user-attachments/assets/a3b3c1cd-f7aa-46ca-8816-ae3ec193d731" />
 
 | 연결 | 방식 | 내용 |
 | --- | --- | --- |
